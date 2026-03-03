@@ -18,6 +18,12 @@ export type { ErrorRecoveryManagerOptions } from './error-recovery-manager.js';
 export { MCPClientManager } from './mcp-client-manager.js';
 export type { MCPClientManagerOptions } from './mcp-client-manager.js';
 
+export { ExecutionPreview } from './execution-preview.js';
+export type { ExecutionPreviewOptions } from './execution-preview.js';
+
+export { ConfirmationManager } from './confirmation-manager.js';
+export type { ConfirmationManagerOptions } from './confirmation-manager.js';
+
 export type {
   MarketRegime,
   RegimeClassification,
