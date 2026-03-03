@@ -95,3 +95,19 @@ export class RateLimitError extends CyrusError {
     super(`Rate limited on ${context.endpoint}`, context);
   }
 }
+
+export class StrategyConfigError extends CyrusError {
+  readonly field: string;
+  readonly value: unknown;
+
+  constructor(context: {
+    field: string;
+    value: unknown;
+    message?: string;
+  }) {
+    const msg = context.message ?? `Invalid strategy config: ${context.field} = ${String(context.value)}`;
+    super(msg, { field: context.field, value: String(context.value) });
+    this.field = context.field;
+    this.value = context.value;
+  }
+}

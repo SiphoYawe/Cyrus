@@ -161,3 +161,60 @@ export interface ExecutionResult {
   readonly error: string | null;
   readonly metadata: Record<string, unknown>;
 }
+
+// --- Strategy types ---
+
+// Signal direction — string literal union, not enum
+export type SignalDirection = 'long' | 'short' | 'exit';
+
+// Token info for strategy signals
+export interface TokenInfo {
+  readonly address: TokenAddress;
+  readonly symbol: string;
+  readonly decimals: number;
+}
+
+// Strategy signal — what a strategy wants to do
+export interface StrategySignal {
+  readonly direction: SignalDirection;
+  readonly tokenPair: {
+    readonly from: TokenInfo;
+    readonly to: TokenInfo;
+  };
+  readonly sourceChain: ChainId;
+  readonly destChain: ChainId;
+  readonly strength: number; // 0-1
+  readonly reason: string;
+  readonly metadata: Record<string, unknown>;
+}
+
+// Execution plan — concrete actions for a signal
+export interface ExecutionPlan {
+  readonly id: string;
+  readonly strategyName: string;
+  readonly actions: import('./action-types.js').ExecutorAction[];
+  readonly estimatedCostUsd: number;
+  readonly estimatedDurationMs: number;
+  readonly metadata: Record<string, unknown>;
+}
+
+// Strategy context — snapshot of agent state passed to strategies each tick
+export interface StrategyContext {
+  readonly timestamp: number;
+  readonly balances: Map<string, bigint>; // key: `${chainId}-${tokenAddress}`
+  readonly positions: readonly Position[];
+  readonly prices: Map<string, number>; // key: `${chainId}-${tokenAddress}`, value: USD price
+  readonly activeTransfers: readonly InFlightTransfer[];
+}
+
+// Risk parameters — declarative risk config per strategy
+export interface RiskParams {
+  readonly stoploss: number; // negative, e.g. -0.10 = -10%
+  readonly minimalRoi: Readonly<Record<number, number>>; // minutes -> minimum ROI
+  readonly trailingStop: boolean;
+  readonly trailingStopPositive: number | undefined;
+  readonly maxPositions: number;
+}
+
+// Strategy filter — predicate function for gating execution
+export type StrategyFilter = (ctx: StrategyContext) => boolean;
