@@ -1,0 +1,311 @@
+import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import { createLogger } from '../utils/logger.js';
+import type {
+  BalanceEntry,
+  InFlightTransfer,
+  CompletedTransfer,
+  Position,
+  PriceEntry,
+  Trade,
+  ChainId,
+  TokenAddress,
+  TransferId,
+  TransferStatus,
+} from './types.js';
+import { transferId } from './types.js';
+
+const logger = createLogger('store');
+
+// Store event types
+export type StoreEventMap = {
+  'balance.updated': [BalanceEntry];
+  'transfer.created': [InFlightTransfer];
+  'transfer.updated': [InFlightTransfer];
+  'transfer.completed': [CompletedTransfer];
+  'position.updated': [Position];
+  'price.updated': [PriceEntry];
+};
+
+export type StoreEventName = keyof StoreEventMap;
+
+// Params for creating a transfer
+export interface CreateTransferParams {
+  readonly txHash: string | null;
+  readonly fromChain: ChainId;
+  readonly toChain: ChainId;
+  readonly fromToken: TokenAddress;
+  readonly toToken: TokenAddress;
+  readonly amount: bigint;
+  readonly bridge: string;
+  readonly quoteData: unknown;
+}
+
+function balanceKey(chainId: ChainId, tokenAddress: TokenAddress): string {
+  return `${chainId}-${tokenAddress}`;
+}
+
+function priceKey(chainId: ChainId, tokenAddress: TokenAddress): string {
+  return `${chainId}-${tokenAddress}`;
+}
+
+export class Store {
+  private static instance: Store | null = null;
+
+  readonly emitter: EventEmitter;
+
+  private readonly balances: Map<string, BalanceEntry>;
+  private readonly transfers: Map<string, InFlightTransfer>;
+  private readonly completedTransfers: Map<string, CompletedTransfer>;
+  private readonly positions: Map<string, Position>;
+  private readonly prices: Map<string, PriceEntry>;
+  private readonly trades: Map<string, Trade>;
+
+  private constructor() {
+    this.emitter = new EventEmitter();
+    this.balances = new Map();
+    this.transfers = new Map();
+    this.completedTransfers = new Map();
+    this.positions = new Map();
+    this.prices = new Map();
+    this.trades = new Map();
+  }
+
+  static getInstance(): Store {
+    if (!Store.instance) {
+      Store.instance = new Store();
+    }
+    return Store.instance;
+  }
+
+  // --- Balance methods ---
+
+  setBalance(
+    chainId: ChainId,
+    tokenAddress: TokenAddress,
+    amount: bigint,
+    usdValue: number,
+    symbol: string,
+    decimals: number,
+  ): void {
+    const key = balanceKey(chainId, tokenAddress);
+    const entry: BalanceEntry = {
+      chainId,
+      tokenAddress,
+      symbol,
+      decimals,
+      amount,
+      usdValue,
+      updatedAt: Date.now(),
+    };
+    this.balances.set(key, entry);
+    this.emitter.emit('balance.updated', entry);
+    logger.debug({ chainId, tokenAddress, amount: amount.toString(), symbol }, 'Balance updated');
+  }
+
+  getBalance(chainId: ChainId, tokenAddress: TokenAddress): BalanceEntry | undefined {
+    return this.balances.get(balanceKey(chainId, tokenAddress));
+  }
+
+  getAvailableBalance(chainId: ChainId, tokenAddress: TokenAddress): bigint {
+    const balance = this.getBalance(chainId, tokenAddress);
+    if (!balance) return 0n;
+
+    const inFlight = this.getInFlightByChainAndToken(chainId, tokenAddress);
+    const lockedAmount = inFlight.reduce((sum, t) => sum + t.amount, 0n);
+
+    const available = balance.amount - lockedAmount;
+    return available > 0n ? available : 0n;
+  }
+
+  getAllBalances(): BalanceEntry[] {
+    return Array.from(this.balances.values());
+  }
+
+  getBalancesByChain(chainId: ChainId): BalanceEntry[] {
+    return Array.from(this.balances.values()).filter((b) => b.chainId === chainId);
+  }
+
+  // --- Transfer methods ---
+
+  createTransfer(params: CreateTransferParams): InFlightTransfer {
+    const id = transferId(randomUUID());
+    const now = Date.now();
+
+    const transfer: InFlightTransfer = {
+      id,
+      txHash: params.txHash,
+      fromChain: params.fromChain,
+      toChain: params.toChain,
+      fromToken: params.fromToken,
+      toToken: params.toToken,
+      amount: params.amount,
+      bridge: params.bridge,
+      status: 'in_flight' as TransferStatus,
+      quoteData: params.quoteData,
+      createdAt: now,
+      updatedAt: now,
+      recovered: false,
+    };
+
+    this.transfers.set(id, transfer);
+    this.emitter.emit('transfer.created', transfer);
+    logger.info(
+      { transferId: id, fromChain: params.fromChain, toChain: params.toChain, bridge: params.bridge },
+      'Transfer created',
+    );
+
+    return transfer;
+  }
+
+  updateTransferStatus(id: TransferId, status: TransferStatus, metadata?: { txHash?: string }): void {
+    const transfer = this.transfers.get(id);
+    if (!transfer) {
+      logger.warn({ transferId: id }, 'Attempted to update non-existent transfer');
+      return;
+    }
+
+    transfer.status = status;
+    transfer.updatedAt = Date.now();
+
+    if (metadata?.txHash) {
+      transfer.txHash = metadata.txHash;
+    }
+
+    this.emitter.emit('transfer.updated', transfer);
+    logger.info({ transferId: id, status }, 'Transfer status updated');
+  }
+
+  completeTransfer(
+    id: TransferId,
+    receivedAmount: bigint,
+    receivedToken: TokenAddress,
+    receivedChain: ChainId,
+  ): void {
+    const transfer = this.transfers.get(id);
+    if (!transfer) {
+      logger.warn({ transferId: id }, 'Attempted to complete non-existent transfer');
+      return;
+    }
+
+    // Determine final status
+    const finalStatus: TransferStatus =
+      receivedAmount > 0n ? 'completed' : 'failed';
+
+    const completed: CompletedTransfer = {
+      id: transfer.id,
+      txHash: transfer.txHash ?? '',
+      fromChain: transfer.fromChain,
+      toChain: transfer.toChain,
+      fromToken: transfer.fromToken,
+      toToken: transfer.toToken,
+      fromAmount: transfer.amount,
+      toAmount: receivedAmount,
+      bridge: transfer.bridge,
+      status: finalStatus,
+      completedAt: Date.now(),
+    };
+
+    // Move from active to completed
+    this.transfers.delete(id);
+    this.completedTransfers.set(id, completed);
+
+    this.emitter.emit('transfer.completed', completed);
+    logger.info(
+      {
+        transferId: id,
+        status: finalStatus,
+        receivedAmount: receivedAmount.toString(),
+        receivedToken,
+        receivedChain,
+      },
+      'Transfer completed',
+    );
+  }
+
+  getInFlightByChainAndToken(chainId: ChainId, tokenAddress: TokenAddress): InFlightTransfer[] {
+    return Array.from(this.transfers.values()).filter(
+      (t) => t.fromChain === chainId && t.fromToken === tokenAddress,
+    );
+  }
+
+  getActiveTransfers(): InFlightTransfer[] {
+    return Array.from(this.transfers.values());
+  }
+
+  getCompletedTransfers(): CompletedTransfer[] {
+    return Array.from(this.completedTransfers.values());
+  }
+
+  getTransfer(id: TransferId): InFlightTransfer | undefined {
+    return this.transfers.get(id);
+  }
+
+  // --- Position methods ---
+
+  setPosition(position: Position): void {
+    this.positions.set(position.id, position);
+    this.emitter.emit('position.updated', position);
+  }
+
+  getPosition(id: string): Position | undefined {
+    return this.positions.get(id);
+  }
+
+  getAllPositions(): Position[] {
+    return Array.from(this.positions.values());
+  }
+
+  // --- Price methods ---
+
+  setPrice(chainId: ChainId, tokenAddress: TokenAddress, priceUsd: number): void {
+    const key = priceKey(chainId, tokenAddress);
+    const entry: PriceEntry = {
+      chainId,
+      tokenAddress,
+      priceUsd,
+      timestamp: Date.now(),
+    };
+    this.prices.set(key, entry);
+    this.emitter.emit('price.updated', entry);
+  }
+
+  getPrice(chainId: ChainId, tokenAddress: TokenAddress): PriceEntry | undefined {
+    return this.prices.get(priceKey(chainId, tokenAddress));
+  }
+
+  // --- Trade methods ---
+
+  addTrade(trade: Trade): void {
+    this.trades.set(trade.id, trade);
+  }
+
+  getTrade(id: string): Trade | undefined {
+    return this.trades.get(id);
+  }
+
+  getAllTrades(): Trade[] {
+    return Array.from(this.trades.values());
+  }
+
+  // --- Restore (for crash recovery) ---
+
+  restoreTransfer(transfer: InFlightTransfer): void {
+    this.transfers.set(transfer.id, transfer);
+    logger.info({ transferId: transfer.id, status: transfer.status }, 'Transfer restored from persistence');
+  }
+
+  // --- Reset (for tests) ---
+
+  reset(): void {
+    this.balances.clear();
+    this.transfers.clear();
+    this.completedTransfers.clear();
+    this.positions.clear();
+    this.prices.clear();
+    this.trades.clear();
+    this.emitter.removeAllListeners();
+    Store.instance = null;
+    logger.debug('Store reset');
+  }
+}
