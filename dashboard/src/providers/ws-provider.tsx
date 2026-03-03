@@ -15,6 +15,7 @@ import { usePortfolioStore } from '@/stores/portfolio-store';
 import { useTransfersStore } from '@/stores/transfers-store';
 import { useAgentStore } from '@/stores/agent-store';
 import { useChatStore } from '@/stores/chat-store';
+import { useStrategiesStore } from '@/stores/strategies-store';
 
 interface WsContextValue {
   status: ConnectionStatus;
@@ -49,12 +50,14 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     const transfersHandler = useTransfersStore.getState().handleWsEvent;
     const agentHandler = useAgentStore.getState().handleWsEvent;
     const chatHandler = useChatStore.getState().handleWsEvent;
+    const strategiesHandler = useStrategiesStore.getState().handleWsEvent;
 
     const unsubMessage = client.onMessage((event) => {
       portfolioHandler(event);
       transfersHandler(event);
       agentHandler(event);
       chatHandler(event);
+      strategiesHandler(event);
     });
 
     client.connect();

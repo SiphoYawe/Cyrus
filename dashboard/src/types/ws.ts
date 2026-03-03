@@ -22,6 +22,7 @@ export const WS_EVENT_TYPES = {
   AI_STRATEGY_SELECTION_CHANGED: 'ai.strategy.selection_changed',
   CONFIRMATION_REQUEST: 'confirmation.request',
   RECOVERY_OPTIONS: 'recovery.options',
+  STRATEGY_STATUS_UPDATED: 'strategy.status.updated',
 } as const;
 
 export type WsEventType = (typeof WS_EVENT_TYPES)[keyof typeof WS_EVENT_TYPES];
