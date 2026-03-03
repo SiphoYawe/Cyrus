@@ -8,6 +8,7 @@ import type { LiFiConnectorInterface, QuoteResult } from '../connectors/types.js
 import { Store } from '../core/store.js';
 import type { ComposerAction, ExecutorAction } from '../core/action-types.js';
 import { chainId, tokenAddress } from '../core/types.js';
+import { EXECUTOR_STAGES } from './base-executor.js';
 
 // --- Mock factories ---
 
@@ -58,7 +59,11 @@ function createMockConnector(
     getRoutes: vi.fn().mockResolvedValue([]),
     getChains: vi.fn().mockResolvedValue([]),
     getTokens: vi.fn().mockResolvedValue([]),
-    getStatus: vi.fn().mockResolvedValue({ status: 'DONE' }),
+    getStatus: vi.fn().mockResolvedValue({
+      status: 'DONE',
+      substatus: 'COMPLETED',
+      receiving: { amount: '980000', token: { address: '0x7bfa7c4f149e7415b73bdedfe609237e29cbf34a' } },
+    }),
     getConnections: vi.fn().mockResolvedValue([]),
     getTools: vi.fn().mockResolvedValue([]),
     ...overrides,
@@ -93,6 +98,11 @@ function createMockPreFlightChecker(
   } as unknown as PreFlightChecker;
 }
 
+const FROM_CHAIN = chainId(8453);
+const TO_CHAIN = chainId(8453);
+const FROM_TOKEN = tokenAddress('0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'); // USDC on Base
+const TO_TOKEN = tokenAddress('0x7bfa7c4f149e7415b73bdedfe609237e29cbf34a');   // Morpho vault on Base
+
 function makeComposerAction(overrides: Partial<ComposerAction> = {}): ComposerAction {
   return {
     id: 'composer-1',
@@ -100,10 +110,10 @@ function makeComposerAction(overrides: Partial<ComposerAction> = {}): ComposerAc
     priority: 5,
     createdAt: Date.now(),
     strategyId: 'yield-strategy',
-    fromChain: chainId(8453),
-    toChain: chainId(8453),
-    fromToken: tokenAddress('0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'), // USDC on Base
-    toToken: tokenAddress('0x7bfa7c4f149e7415b73bdedfe609237e29cbf34a'),   // Morpho vault on Base
+    fromChain: FROM_CHAIN,
+    toChain: TO_CHAIN,
+    fromToken: FROM_TOKEN,
+    toToken: TO_TOKEN,
     amount: 1_000_000n,
     protocol: 'morpho',
     metadata: {},
@@ -111,13 +121,13 @@ function makeComposerAction(overrides: Partial<ComposerAction> = {}): ComposerAc
   };
 }
 
-const defaultConfig: ComposerExecutorConfig = {
-  enabled: true,
-  supportedProtocols: ['aave-v3', 'morpho', 'euler', 'pendle', 'lido', 'etherfi', 'ethena'],
-  defaultSlippage: 0.005,
-  maxGasCostUsd: 50,
-  maxBridgeTimeout: 300,
+const defaultConfig: Partial<ComposerExecutorConfig> = {
+  pollIntervalMs: 0, // instant polling for tests
 };
+
+function setupBalance(store: Store, amount: bigint = 10_000_000n): void {
+  store.setBalance(FROM_CHAIN, FROM_TOKEN, amount, 10.0, 'USDC', 6);
+}
 
 describe('ComposerExecutor', () => {
   let store: Store;
@@ -132,25 +142,18 @@ describe('ComposerExecutor', () => {
   describe('canHandle', () => {
     it('returns true for composer action', () => {
       const executor = new ComposerExecutor(
-        createMockConnector(),
-        createMockApprovalHandler(),
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
+        createMockConnector(), createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
       );
-
       expect(executor.canHandle(makeComposerAction())).toBe(true);
     });
 
     it('returns false for swap action', () => {
       const executor = new ComposerExecutor(
-        createMockConnector(),
-        createMockApprovalHandler(),
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
+        createMockConnector(), createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
       );
 
       const swapAction = {
@@ -166,19 +169,16 @@ describe('ComposerExecutor', () => {
         amount: 100n,
         slippage: 0.005,
         metadata: {},
-      };
+      } as ExecutorAction;
 
       expect(executor.canHandle(swapAction)).toBe(false);
     });
 
     it('returns false for bridge action', () => {
       const executor = new ComposerExecutor(
-        createMockConnector(),
-        createMockApprovalHandler(),
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
+        createMockConnector(), createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
       );
 
       const bridgeAction = {
@@ -193,16 +193,62 @@ describe('ComposerExecutor', () => {
         toToken: tokenAddress('0xaf88d065e77c8cc2239327c5edb3a432268e5831'),
         amount: 100n,
         metadata: {},
-      };
+      } as ExecutorAction;
 
       expect(executor.canHandle(bridgeAction)).toBe(false);
     });
   });
 
-  // --- Full happy path ---
+  // --- Trigger stage ---
 
-  describe('happy path', () => {
-    it('executes full flow: quote -> preflight -> approval -> tx -> store', async () => {
+  describe('trigger stage', () => {
+    it('rejects unsupported protocol', async () => {
+      setupBalance(store);
+      const executor = new ComposerExecutor(
+        createMockConnector(), createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
+      );
+
+      const action = makeComposerAction({ protocol: 'unknown-protocol' });
+      const result = await executor.execute(action);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Unsupported protocol');
+      expect(result.error).toContain('unknown-protocol');
+    });
+
+    it('rejects when insufficient balance', async () => {
+      // No balance set up — store has 0
+      const executor = new ComposerExecutor(
+        createMockConnector(), createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
+      );
+
+      const result = await executor.execute(makeComposerAction());
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Insufficient balance');
+    });
+
+    it('passes with valid protocol and sufficient balance', async () => {
+      setupBalance(store);
+      const executor = new ComposerExecutor(
+        createMockConnector(), createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
+      );
+
+      const result = await executor.execute(makeComposerAction());
+      expect(result.success).toBe(true);
+    });
+  });
+
+  // --- Full pipeline happy path ---
+
+  describe('stage pipeline happy path', () => {
+    it('executes Trigger -> Open -> Manage -> Close with COMPLETED status', async () => {
+      setupBalance(store);
       const mockConnector = createMockConnector();
       const mockApproval = createMockApprovalHandler({
         handleApproval: vi.fn().mockResolvedValue('0xapprovaltx'),
@@ -211,12 +257,8 @@ describe('ComposerExecutor', () => {
       const mockPreFlight = createMockPreFlightChecker();
 
       const executor = new ComposerExecutor(
-        mockConnector,
-        mockApproval,
-        mockTxExecutor,
-        mockPreFlight,
-        store,
-        defaultConfig,
+        mockConnector, mockApproval, mockTxExecutor,
+        mockPreFlight, store, defaultConfig,
       );
 
       const action = makeComposerAction();
@@ -240,170 +282,53 @@ describe('ComposerExecutor', () => {
       // 4. Transaction was executed
       expect(mockTxExecutor.execute).toHaveBeenCalledTimes(1);
 
-      // 5. Result is successful
+      // 5. Status was polled
+      expect(mockConnector.getStatus).toHaveBeenCalled();
+
+      // 6. Result is successful
       expect(result.success).toBe(true);
       expect(result.txHash).toBeDefined();
       expect(result.transferId).toBeDefined();
       expect(result.error).toBeNull();
 
-      // 6. Metadata includes isComposer and protocol
-      expect(result.metadata.isComposer).toBe(true);
+      // 7. Metadata includes protocol and status
+      expect(result.metadata.status).toBe('DONE');
+      expect(result.metadata.substatus).toBe('COMPLETED');
       expect(result.metadata.protocol).toBe('morpho');
-      expect(result.metadata.tool).toBe('lifi-composer');
+      expect(result.metadata.bridge).toBe('lifi-composer');
 
-      // 7. Transfer was created in store
+      // 8. Transfer was completed in store (moved from active to completed)
       const activeTransfers = store.getActiveTransfers();
-      expect(activeTransfers).toHaveLength(1);
-      expect(activeTransfers[0].amount).toBe(action.amount);
-      expect(activeTransfers[0].fromChain).toBe(action.fromChain);
-      expect(activeTransfers[0].toChain).toBe(action.toChain);
-    });
-
-    it('includes approval tx hash in metadata when approval is needed', async () => {
-      const mockApproval = createMockApprovalHandler({
-        handleApproval: vi.fn().mockResolvedValue('0xapproval123'),
-      });
-
-      const executor = new ComposerExecutor(
-        createMockConnector(),
-        mockApproval,
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
-      );
-
-      const result = await executor.execute(makeComposerAction());
-
-      expect(result.success).toBe(true);
-      expect(result.metadata.approvalTxHash).toBe('0xapproval123');
-    });
-
-    it('works without approval needed', async () => {
-      const mockApproval = createMockApprovalHandler({
-        handleApproval: vi.fn().mockResolvedValue(null),
-      });
-
-      const executor = new ComposerExecutor(
-        createMockConnector(),
-        mockApproval,
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
-      );
-
-      const result = await executor.execute(makeComposerAction());
-
-      expect(result.success).toBe(true);
-      expect(result.metadata.approvalTxHash).toBeUndefined();
+      expect(activeTransfers).toHaveLength(0);
+      const completedTransfers = store.getCompletedTransfers();
+      expect(completedTransfers).toHaveLength(1);
+      expect(completedTransfers[0].toChain).toBe(action.toChain);
     });
   });
 
-  // --- Disabled config ---
+  // --- Open stage ---
 
-  describe('disabled Composer config', () => {
-    it('returns failure when Composer is disabled', async () => {
-      const disabledConfig: ComposerExecutorConfig = {
-        ...defaultConfig,
-        enabled: false,
-      };
-
-      const mockConnector = createMockConnector();
-      const mockApproval = createMockApprovalHandler();
-      const mockTxExecutor = createMockTransactionExecutor();
-
-      const executor = new ComposerExecutor(
-        mockConnector,
-        mockApproval,
-        mockTxExecutor,
-        createMockPreFlightChecker(),
-        store,
-        disabledConfig,
-      );
-
-      const action = makeComposerAction();
-      const result = await executor.execute(action);
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('disabled');
-
-      // No calls to connector, approval, or tx executor
-      expect(mockConnector.getQuote).not.toHaveBeenCalled();
-      expect(mockApproval.handleApproval).not.toHaveBeenCalled();
-      expect(mockTxExecutor.execute).not.toHaveBeenCalled();
-
-      // No transfer in store
-      expect(store.getActiveTransfers()).toHaveLength(0);
-    });
-  });
-
-  // --- Unsupported protocol ---
-
-  describe('unsupported protocol', () => {
-    it('rejects unsupported protocol', async () => {
-      const limitedConfig: ComposerExecutorConfig = {
-        ...defaultConfig,
-        supportedProtocols: ['aave-v3', 'morpho'],
-      };
-
-      const mockConnector = createMockConnector();
-
-      const executor = new ComposerExecutor(
-        mockConnector,
-        createMockApprovalHandler(),
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        limitedConfig,
-      );
-
-      const action = makeComposerAction({ protocol: 'pendle' });
-      const result = await executor.execute(action);
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Unsupported protocol');
-      expect(result.error).toContain('pendle');
-      expect(result.metadata.protocol).toBe('pendle');
-
-      // No quote call
-      expect(mockConnector.getQuote).not.toHaveBeenCalled();
-
-      // No transfer in store
-      expect(store.getActiveTransfers()).toHaveLength(0);
-    });
-  });
-
-  // --- Pre-flight failure ---
-
-  describe('pre-flight failure', () => {
-    it('aborts execution when pre-flight checks fail', async () => {
+  describe('open stage', () => {
+    it('rejects when pre-flight checks fail', async () => {
+      setupBalance(store);
       const failResult: PreFlightResult = {
         passed: false,
         failures: ['Gas cost $60.00 exceeds ceiling $50'],
       };
-      const mockPreFlight = createMockPreFlightChecker({
-        runAllChecks: vi.fn().mockReturnValue(failResult),
-      });
-      const mockTxExecutor = createMockTransactionExecutor();
       const mockApproval = createMockApprovalHandler();
+      const mockTxExecutor = createMockTransactionExecutor();
 
       const executor = new ComposerExecutor(
-        createMockConnector(),
-        mockApproval,
+        createMockConnector(), mockApproval,
         mockTxExecutor,
-        mockPreFlight,
-        store,
-        defaultConfig,
+        createMockPreFlightChecker({ runAllChecks: vi.fn().mockReturnValue(failResult) }),
+        store, defaultConfig,
       );
 
-      const action = makeComposerAction();
-      const result = await executor.execute(action);
-
+      const result = await executor.execute(makeComposerAction());
       expect(result.success).toBe(false);
       expect(result.error).toContain('Pre-flight checks failed');
       expect(result.error).toContain('Gas cost');
-      expect(result.metadata.isComposer).toBe(true);
 
       // Approval and transaction should NOT have been called
       expect(mockApproval.handleApproval).not.toHaveBeenCalled();
@@ -412,179 +337,233 @@ describe('ComposerExecutor', () => {
       // No transfer in store
       expect(store.getActiveTransfers()).toHaveLength(0);
     });
-  });
 
-  // --- Error handling / failure with fallback ---
-
-  describe('failure with fallback steps', () => {
-    it('returns fallback steps when quote fails', async () => {
-      const mockConnector = createMockConnector({
-        getQuote: vi.fn().mockRejectedValue(new Error('No Composer route found')),
-      });
-
-      const executor = new ComposerExecutor(
-        mockConnector,
-        createMockApprovalHandler(),
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
-      );
-
-      const action = makeComposerAction();
-      const result = await executor.execute(action);
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('No Composer route found');
-      expect(result.metadata.isComposer).toBe(true);
-      expect(result.metadata.protocol).toBe('morpho');
-      expect(result.metadata.errorType).toBe('Error');
-      expect(result.metadata.fallbackSteps).toBeDefined();
-      expect(Array.isArray(result.metadata.fallbackSteps)).toBe(true);
-      expect((result.metadata.fallbackSteps as string[]).length).toBeGreaterThan(0);
-
-      // No transfer in store
-      expect(store.getActiveTransfers()).toHaveLength(0);
-    });
-
-    it('returns fallback steps when transaction fails', async () => {
+    it('retries on execution reverted with fresh quote', async () => {
+      setupBalance(store);
+      const mockConnector = createMockConnector();
       const mockTxExecutor = createMockTransactionExecutor({
-        execute: vi.fn().mockRejectedValue(new Error('Transaction reverted')),
+        execute: vi.fn()
+          .mockRejectedValueOnce(new Error('execution reverted'))
+          .mockResolvedValueOnce(createMockTxResult()),
       });
 
       const executor = new ComposerExecutor(
-        createMockConnector(),
-        createMockApprovalHandler(),
-        mockTxExecutor,
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
+        mockConnector, createMockApprovalHandler(), mockTxExecutor,
+        createMockPreFlightChecker(), store, defaultConfig,
       );
 
-      const action = makeComposerAction();
-      const result = await executor.execute(action);
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Transaction reverted');
-      expect(result.metadata.fallbackSteps).toBeDefined();
-      expect((result.metadata.fallbackSteps as string[])).toEqual(
-        expect.arrayContaining([expect.stringContaining('protocol')]),
-      );
+      const result = await executor.execute(makeComposerAction());
+      expect(result.success).toBe(true);
+      // Two quotes requested (original + retry)
+      expect(mockConnector.getQuote).toHaveBeenCalledTimes(2);
     });
 
-    it('returns fallback steps when approval fails', async () => {
-      const mockApproval = createMockApprovalHandler({
-        handleApproval: vi.fn().mockRejectedValue(new Error('Approval rejected by user')),
+    it('fails permanently after max retry attempts on revert', async () => {
+      setupBalance(store);
+      const mockTxExecutor = createMockTransactionExecutor({
+        execute: vi.fn().mockRejectedValue(new Error('execution reverted')),
       });
 
       const executor = new ComposerExecutor(
-        createMockConnector(),
-        mockApproval,
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
+        createMockConnector(), createMockApprovalHandler(), mockTxExecutor,
+        createMockPreFlightChecker(), store, defaultConfig,
       );
 
-      const action = makeComposerAction();
-      const result = await executor.execute(action);
-
+      const result = await executor.execute(makeComposerAction());
       expect(result.success).toBe(false);
-      expect(result.error).toContain('Approval rejected');
-      expect(result.metadata.fallbackSteps).toBeDefined();
+      expect(result.error).toContain('execution reverted');
+    });
+
+    it('does not retry non-revert errors', async () => {
+      setupBalance(store);
+      const mockConnector = createMockConnector();
+      const mockTxExecutor = createMockTransactionExecutor({
+        execute: vi.fn().mockRejectedValue(new Error('insufficient funds')),
+      });
+
+      const executor = new ComposerExecutor(
+        mockConnector, createMockApprovalHandler(), mockTxExecutor,
+        createMockPreFlightChecker(), store, defaultConfig,
+      );
+
+      const result = await executor.execute(makeComposerAction());
+      expect(result.success).toBe(false);
+      // Only one quote requested (no retry)
+      expect(mockConnector.getQuote).toHaveBeenCalledTimes(1);
     });
   });
 
-  // --- Cannot handle wrong action type ---
+  // --- Manage stage ---
 
-  describe('wrong action type', () => {
-    it('returns failure for non-composer action type', async () => {
+  describe('manage stage', () => {
+    it('handles NOT_FOUND -> PENDING -> DONE transitions', async () => {
+      setupBalance(store);
+      const mockConnector = createMockConnector({
+        getStatus: vi.fn()
+          .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+          .mockResolvedValueOnce({ status: 'PENDING' })
+          .mockResolvedValueOnce({
+            status: 'DONE', substatus: 'COMPLETED',
+            receiving: { amount: '980000', token: { address: '0x7bfa7c4f149e7415b73bdedfe609237e29cbf34a' } },
+          }),
+      });
+
       const executor = new ComposerExecutor(
-        createMockConnector(),
-        createMockApprovalHandler(),
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
+        mockConnector, createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
       );
 
-      const swapAction = {
-        id: 'swap-1',
-        type: 'swap' as const,
-        priority: 1,
-        createdAt: Date.now(),
-        strategyId: 'test',
-        fromChain: chainId(1),
-        toChain: chainId(1),
-        fromToken: tokenAddress('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'),
-        toToken: tokenAddress('0xdac17f958d2ee523a2206206994597c13d831ec7'),
-        amount: 100n,
-        slippage: 0.005,
-        metadata: {},
-      } as ExecutorAction;
+      const result = await executor.execute(makeComposerAction());
+      expect(result.success).toBe(true);
+      expect(mockConnector.getStatus).toHaveBeenCalledTimes(3);
+    });
 
-      const result = await executor.execute(swapAction);
+    it('handles FAILED terminal status from manage', async () => {
+      setupBalance(store);
+      const mockConnector = createMockConnector({
+        getStatus: vi.fn().mockResolvedValue({ status: 'FAILED' }),
+      });
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('cannot handle');
+      const executor = new ComposerExecutor(
+        mockConnector, createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
+      );
+
+      const result = await executor.execute(makeComposerAction());
+      expect(result.success).toBe(true);
+      expect(result.metadata.status).toBe('FAILED');
     });
   });
 
-  // --- handleComposerFailure ---
+  // --- Close stage ---
 
-  describe('handleComposerFailure', () => {
-    it('produces failure result with fallback steps', () => {
+  describe('close stage', () => {
+    it('handles COMPLETED status and updates destination chain balance', async () => {
+      setupBalance(store);
       const executor = new ComposerExecutor(
-        createMockConnector(),
-        createMockApprovalHandler(),
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
+        createMockConnector(), createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
       );
 
-      const action = makeComposerAction();
-      const error = new Error('Vault is paused');
-      const result = executor.handleComposerFailure(action, error);
-
-      expect(result.success).toBe(false);
-      expect(result.transferId).toBeNull();
-      expect(result.txHash).toBeNull();
-      expect(result.error).toBe('Vault is paused');
-      expect(result.metadata.isComposer).toBe(true);
-      expect(result.metadata.protocol).toBe('morpho');
-      expect(result.metadata.errorType).toBe('Error');
-      expect(result.metadata.fallbackSteps).toBeDefined();
-
-      const fallbackSteps = result.metadata.fallbackSteps as string[];
-      expect(fallbackSteps.length).toBeGreaterThanOrEqual(3);
-      expect(fallbackSteps.some((s) => s.includes('swap'))).toBe(true);
-      expect(fallbackSteps.some((s) => s.includes('protocol'))).toBe(true);
-    });
-  });
-
-  // --- Result metadata ---
-
-  describe('result metadata', () => {
-    it('includes tool, bridge, protocol, and isComposer in metadata', async () => {
-      const executor = new ComposerExecutor(
-        createMockConnector(),
-        createMockApprovalHandler(),
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
-      );
-
-      const action = makeComposerAction();
-      const result = await executor.execute(action);
-
-      expect(result.metadata.tool).toBe('lifi-composer');
+      const result = await executor.execute(makeComposerAction());
+      expect(result.success).toBe(true);
+      expect(result.metadata.status).toBe('DONE');
+      expect(result.metadata.substatus).toBe('COMPLETED');
       expect(result.metadata.bridge).toBe('lifi-composer');
       expect(result.metadata.protocol).toBe('morpho');
-      expect(result.metadata.isComposer).toBe(true);
-      expect(result.metadata.blockNumber).toBeDefined();
-      expect(result.metadata.gasUsed).toBeDefined();
+
+      // Transfer completed in store
+      const completed = store.getCompletedTransfers();
+      expect(completed).toHaveLength(1);
+      expect(completed[0].toAmount).toBe(980000n);
+    });
+
+    it('handles PARTIAL status', async () => {
+      setupBalance(store);
+      const mockConnector = createMockConnector({
+        getStatus: vi.fn().mockResolvedValue({
+          status: 'DONE', substatus: 'PARTIAL',
+          receiving: { amount: '500000', token: { address: '0x7bfa7c4f149e7415b73bdedfe609237e29cbf34a' } },
+        }),
+      });
+
+      const executor = new ComposerExecutor(
+        mockConnector, createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
+      );
+
+      const result = await executor.execute(makeComposerAction());
+      expect(result.success).toBe(true);
+      expect(result.metadata.substatus).toBe('PARTIAL');
+
+      const completed = store.getCompletedTransfers();
+      expect(completed).toHaveLength(1);
+      expect(completed[0].toAmount).toBe(500000n);
+    });
+
+    it('handles REFUNDED status — restores source chain', async () => {
+      setupBalance(store);
+      const mockConnector = createMockConnector({
+        getStatus: vi.fn().mockResolvedValue({
+          status: 'DONE', substatus: 'REFUNDED',
+          receiving: { amount: '0' },
+        }),
+      });
+
+      const executor = new ComposerExecutor(
+        mockConnector, createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
+      );
+
+      const result = await executor.execute(makeComposerAction());
+      expect(result.success).toBe(true);
+      expect(result.metadata.substatus).toBe('REFUNDED');
+    });
+
+    it('handles FAILED status — marks transfer as failed', async () => {
+      setupBalance(store);
+      const mockConnector = createMockConnector({
+        getStatus: vi.fn().mockResolvedValue({ status: 'FAILED' }),
+      });
+
+      const executor = new ComposerExecutor(
+        mockConnector, createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
+      );
+
+      const result = await executor.execute(makeComposerAction());
+      expect(result.success).toBe(true);
+      expect(result.metadata.status).toBe('FAILED');
+    });
+  });
+
+  // --- Stage tracking ---
+
+  describe('stage tracking', () => {
+    it('tracks current stage through execution', async () => {
+      setupBalance(store);
+      const executor = new ComposerExecutor(
+        createMockConnector(), createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
+      );
+
+      expect(executor.currentStage).toBe(EXECUTOR_STAGES.TRIGGER);
+      await executor.execute(makeComposerAction());
+      expect(executor.currentStage).toBe(EXECUTOR_STAGES.CLOSE);
+    });
+
+    it('sets stage to FAILED on trigger failure', async () => {
+      // No balance — trigger will fail
+      const executor = new ComposerExecutor(
+        createMockConnector(), createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
+      );
+
+      await executor.execute(makeComposerAction());
+      expect(executor.currentStage).toBe(EXECUTOR_STAGES.FAILED);
+    });
+
+    it('sets stage to FAILED on open failure', async () => {
+      setupBalance(store);
+      const executor = new ComposerExecutor(
+        createMockConnector({
+          getQuote: vi.fn().mockRejectedValue(new Error('No route found')),
+        }),
+        createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
+      );
+
+      await executor.execute(makeComposerAction());
+      expect(executor.currentStage).toBe(EXECUTOR_STAGES.FAILED);
     });
   });
 
@@ -592,43 +571,51 @@ describe('ComposerExecutor', () => {
 
   describe('cross-chain Composer', () => {
     it('works with different from/to chains', async () => {
-      const crossChainQuote = createMockQuote();
-      // Override action to be cross-chain
-      const mockConnector = createMockConnector({
-        getQuote: vi.fn().mockResolvedValue({
-          ...crossChainQuote,
-          action: {
-            ...crossChainQuote.action,
-            fromChainId: 1,
-            toChainId: 8453,
-          },
-        }),
-      });
+      const crossChainFromChain = chainId(1);
+      const crossChainFromToken = tokenAddress('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48');
+      store.setBalance(crossChainFromChain, crossChainFromToken, 10_000_000n, 10.0, 'USDC', 6);
+
+      const mockConnector = createMockConnector();
 
       const executor = new ComposerExecutor(
-        mockConnector,
-        createMockApprovalHandler(),
-        createMockTransactionExecutor(),
-        createMockPreFlightChecker(),
-        store,
-        defaultConfig,
+        mockConnector, createMockApprovalHandler(),
+        createMockTransactionExecutor(), createMockPreFlightChecker(),
+        store, defaultConfig,
       );
 
       const action = makeComposerAction({
-        fromChain: chainId(1),
+        fromChain: crossChainFromChain,
         toChain: chainId(8453),
-        fromToken: tokenAddress('0x0000000000000000000000000000000000000000'), // ETH
+        fromToken: crossChainFromToken,
       });
 
       const result = await executor.execute(action);
-
       expect(result.success).toBe(true);
-      expect(result.metadata.isComposer).toBe(true);
 
-      const transfers = store.getActiveTransfers();
-      expect(transfers).toHaveLength(1);
-      expect(transfers[0].fromChain).toBe(chainId(1));
-      expect(transfers[0].toChain).toBe(chainId(8453));
+      const quoteParams = (mockConnector.getQuote as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(quoteParams.fromChain).toBe(crossChainFromChain);
+      expect(quoteParams.toChain).toBe(chainId(8453));
     });
+  });
+
+  // --- All supported protocols ---
+
+  describe('supported protocols', () => {
+    const protocols = ['aave-v3', 'morpho', 'euler', 'pendle', 'lido', 'etherfi', 'ethena'];
+
+    for (const protocol of protocols) {
+      it(`accepts ${protocol} as a supported protocol`, async () => {
+        setupBalance(store);
+        const executor = new ComposerExecutor(
+          createMockConnector(), createMockApprovalHandler(),
+          createMockTransactionExecutor(), createMockPreFlightChecker(),
+          store, defaultConfig,
+        );
+
+        const action = makeComposerAction({ protocol });
+        const result = await executor.execute(action);
+        expect(result.success).toBe(true);
+      });
+    }
   });
 });
