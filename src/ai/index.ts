@@ -1,6 +1,9 @@
 export { AIOrchestrator } from './ai-orchestrator.js';
 export type { AIOrchestatorOptions } from './ai-orchestrator.js';
 
+export { StrategySelector, REGIME_TIER_MAP } from './strategy-selector.js';
+export type { StrategyMetadata } from './strategy-selector.js';
+
 export type {
   MarketRegime,
   RegimeClassification,
