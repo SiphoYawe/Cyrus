@@ -1,0 +1,31 @@
+export { ExecutorOrchestrator } from './executor-orchestrator.js';
+export type { Executor } from './executor-orchestrator.js';
+
+export { ApprovalHandler } from './approval-handler.js';
+export type { ApprovalPublicClient, ApprovalWalletClient } from './approval-handler.js';
+
+export { TransactionExecutor } from './transaction-executor.js';
+export type {
+  TxPublicClient,
+  TxWalletClient,
+  TransactionResult,
+  TransactionReceipt,
+} from './transaction-executor.js';
+
+export { PreFlightChecker } from './pre-flight-checks.js';
+export type { PreFlightConfig, PreFlightResult } from './pre-flight-checks.js';
+
+export { SwapExecutor } from './swap-executor.js';
+export type { SwapExecutorConfig } from './swap-executor.js';
+
+export { ComposerExecutor } from './composer-executor.js';
+export type { ComposerExecutorConfig } from './composer-executor.js';
+
+export {
+  SUPPORTED_PROTOCOLS,
+  VAULT_TOKEN_REGISTRY,
+  isVaultToken,
+  getProtocolInfo,
+  isSupportedProtocol,
+} from './composer-registry.js';
+export type { SupportedProtocol, ProtocolInfo } from './composer-registry.js';
