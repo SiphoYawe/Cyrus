@@ -4,6 +4,7 @@ import { WebSocketProvider } from '@/providers/ws-provider';
 import { AppSidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
 import { ConnectionBanner } from '@/components/layout/connection-banner';
+import { GlobalChatShortcut } from '@/components/chat/global-chat-shortcut';
 
 export default function DashboardLayout({
   children,
@@ -12,6 +13,7 @@ export default function DashboardLayout({
 }) {
   return (
     <WebSocketProvider>
+      <GlobalChatShortcut />
       <div className="flex h-screen overflow-hidden bg-background">
         <AppSidebar />
         <div className="flex flex-1 flex-col overflow-hidden">
