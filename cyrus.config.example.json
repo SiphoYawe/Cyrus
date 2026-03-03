@@ -1,0 +1,36 @@
+{
+  "mode": "dry-run",
+  "tickIntervalMs": 30000,
+  "integrator": "cyrus-agent",
+  "logLevel": "info",
+  "risk": {
+    "defaultSlippage": 0.005,
+    "maxGasCostUsd": 50,
+    "maxPositionSizeUsd": 10000,
+    "maxConcurrentTransfers": 20,
+    "drawdownThreshold": 0.15
+  },
+  "chains": {
+    "enabled": [1, 42161, 10, 137, 8453, 56],
+    "rpcUrls": {}
+  },
+  "strategies": {
+    "enabled": [],
+    "directory": "strategies"
+  },
+  "composer": {
+    "enabled": true,
+    "supportedProtocols": ["aave-v3", "morpho", "euler", "pendle", "lido", "etherfi", "ethena"],
+    "defaultSlippage": 0.005
+  },
+  "ws": {
+    "port": 8080,
+    "enabled": true
+  },
+  "rest": {
+    "port": 3001,
+    "enabled": true,
+    "corsOrigin": "*"
+  },
+  "dbPath": "cyrus.db"
+}
