@@ -2,38 +2,17 @@
 
 Autonomous cross-chain AI agent built on [LI.FI](https://li.fi). Executes real on-chain DeFi strategies, perpetual futures, statistical arbitrage, and market making across EVM and Solana chains with AI-driven decision making, portfolio risk management, and a real-time dashboard.
 
-## Stack
-
-| Dependency | Version | Purpose |
-|---|---|---|
-| TypeScript | ^5.9 | Strict mode, ESM, bigint for all token amounts |
-| @lifi/sdk | ^3.15 | Cross-chain routing, quoting, execution |
-| viem | ^2.46 | EVM wallet interactions, signing, chain switching |
-| better-sqlite3 | ^12.6 | Persistence (WAL mode, versioned migrations) |
-| pino / pino-pretty | ^10.3 / ^13.1 | Structured logging with secret redaction |
-| zod | ^4.3 | Config schema validation |
-| ws | ^8.19 | WebSocket server for real-time dashboard state |
-| @anthropic-ai/sdk | — | Claude API for market regime detection, NL commands, decision reports |
-| Next.js + Tailwind + shadcn/ui | — | Dashboard (dark-first, SIWE auth) |
-| recharts + TradingView Lightweight Charts | — | Financial visualization |
-| Zustand + TanStack Query | — | Dashboard state management |
-| teleproto | — | Telegram MTProto client for signal consumption |
-| @solana/web3.js | — | Solana chain integration |
-| vitest | ^4.0 | Test framework (32 test files) |
-
-Runtime: Node.js ^20.x LTS. Module system: ESM.
-
 ## Supported Chains
 
-Ethereum (1), Arbitrum (42161), Optimism (10), Polygon (137), Base (8453), BSC (56), Solana (1151111081099710).
+Ethereum, Arbitrum, Optimism, Polygon, Base, BSC, Solana.
 
 ## Architecture
 
-The agent runs a tick-based async OODA loop (Observe → Orient → Decide → Act) derived from Hummingbot's RunnableBase pattern. Default tick interval is 30 seconds. The architecture enforces strict separation between decision-making (strategies/controllers) and execution (executors). Controllers never touch the blockchain directly — they emit `ExecutorAction` objects into a priority queue. The `ExecutorOrchestrator` maps action types to executor classes via a type registry.
+The agent runs a tick-based async OODA loop (Observe → Orient → Decide → Act). Default tick interval is 30 seconds. The architecture enforces strict separation between decision-making (strategies/controllers) and execution (executors). Controllers never touch the blockchain directly — they emit `ExecutorAction` objects into a priority queue. The `ExecutorOrchestrator` maps action types to executor classes via a type registry.
 
 ### Core Loop
 
-`RunnableBase` provides the async tick loop with configurable interval, consecutive error tracking (10 errors = auto-pause), and graceful shutdown. `CyrusAgent` extends it, calling `controlTask()` each tick to drain the action queue through the executor orchestrator.
+`RunnableBase` provides the async tick loop with configurable interval, consecutive error tracking (10 errors = auto-pause), and graceful shutdown. `CyrusAgent` extends it, draining the action queue through the executor orchestrator each tick.
 
 ### Action System
 
@@ -41,7 +20,7 @@ A priority queue holds `ExecutorAction` objects using a discriminated union on t
 
 ### State Management
 
-Singleton `Store` (Jesse pattern) using EventEmitter with typed slices: balances (per-chain-per-token composite keys), in-flight transfers (mutable during polling, dual ID: local UUID + blockchain tx hash), completed transfers (immutable historical), positions (entry/current price, PnL per strategy), prices (TTL-cached), and trades (historical execution records). `getAvailableBalance()` deducts in-flight amounts to prevent double-spending. `store.reset()` clears all slices for test isolation.
+Singleton `Store` using EventEmitter with typed slices: balances (per-chain-per-token composite keys), in-flight transfers (mutable during polling, dual ID: local UUID + blockchain tx hash), completed transfers (immutable historical), positions (entry/current price, PnL per strategy), prices (TTL-cached), and trades (historical execution records). `getAvailableBalance()` deducts in-flight amounts to prevent double-spending.
 
 Events emitted: `balance.updated`, `transfer.created`, `transfer.updated`, `transfer.completed`, `position.updated`, `price.updated`.
 
@@ -71,7 +50,7 @@ When `toToken` is a vault/protocol token address, LI.FI Composer auto-activates 
 
 ## Executor Pipeline
 
-Each executor follows the Trigger → Open → Manage → Close stage pipeline (Superalgos pattern).
+Each executor follows the Trigger → Open → Manage → Close stage pipeline.
 
 ### Executors
 
@@ -101,7 +80,7 @@ Validates quote viability before execution: gas cost in USD vs ceiling (default 
 
 ### CrossChainStrategy Abstract Base Class
 
-Strategies extend `CrossChainStrategy` with declarative risk parameters as readonly class properties (Freqtrade pattern): `stoploss`, `minimalRoi`, `trailingStop`, `maxPositions`. Required methods: `shouldExecute(context)` returning `StrategySignal | null`, and `buildExecution(signal, context)` returning `ExecutionPlan`. Optional lifecycle hooks: `onBotStart()`, `onLoopStart()`, `confirmTradeEntry()`, `confirmTradeExit()`, `customStoploss()`. Composable filter chains gate execution — if any filter returns false, the signal is discarded.
+Strategies extend `CrossChainStrategy` with declarative risk parameters as readonly class properties: `stoploss`, `minimalRoi`, `trailingStop`, `maxPositions`. Required methods: `shouldExecute(context)` returning `StrategySignal | null`, and `buildExecution(signal, context)` returning `ExecutionPlan`. Optional lifecycle hooks: `onBotStart()`, `onLoopStart()`, `confirmTradeEntry()`, `confirmTradeExit()`, `customStoploss()`. Composable filter chains gate execution — if any filter returns false, the signal is discarded.
 
 Strategies are mode-unaware. They receive a `StrategyContext` with identical shape regardless of whether the agent runs in live, dry-run, or backtest mode. Mode differences are handled entirely by executor and data layers via dependency injection.
 
@@ -123,19 +102,19 @@ Filesystem discovery with prioritized search paths (user directory first, built-
 
 **PearPairTrader** — delta-neutral pair trading on Pear Protocol. Identifies correlated asset pairs where spread has diverged >2 standard deviations from historical mean. Opens long underperformer + short outperformer with equal notional exposure. Triple Barrier evaluates combined pair P&L, not individual legs.
 
-**MarketMaker** — Hummingbot-style market making on Hyperliquid. Places bid/ask orders around mid-price at configurable spread (default 0.1%) across multiple order levels (default 3). Manages inventory skew — adjusts spreads when inventory is imbalanced, uses LI.FI to bridge excess inventory cross-chain for rebalancing when skew is severe (>85%).
+**MarketMaker** — market making on Hyperliquid. Places bid/ask orders around mid-price at configurable spread (default 0.1%) across multiple order levels (default 3). Manages inventory skew — adjusts spreads when inventory is imbalanced, uses LI.FI to bridge excess inventory cross-chain for rebalancing when skew is severe (>85%).
 
-**FreqtradeAdapter** — abstract adapter mapping Freqtrade's `populateIndicators()`, `populateEntryTrend()`, `populateExitTrend()` interface to Cyrus. Translates Freqtrade risk parameters to Triple Barrier. Includes 3 example ported strategies: RSI Mean Reversion, MACD Crossover, Bollinger Bounce.
+**FreqtradeAdapter** — abstract adapter for porting existing Freqtrade strategies. Maps `populateIndicators()`, `populateEntryTrend()`, `populateExitTrend()` to Cyrus interfaces. Translates risk parameters to Triple Barrier. Includes 3 example ported strategies: RSI Mean Reversion, MACD Crossover, Bollinger Bounce.
 
 ### MarketDataService
 
-Mode-aware routing (Freqtrade DataProvider pattern). In live mode, routes to LI.FI API for current prices. In backtest mode, routes to historical data with strict lookahead prevention (only data up to current simulated timestamp). Exposes a `ready` gate that blocks controller execution until all data sources are connected. Token prices cached with 30s TTL. Builds `StrategyContext` objects containing balances, positions, prices, active transfers, and market microstructure data (order book depth, volume analytics, funding rates, open interest, cross-asset correlations).
+Mode-aware routing. In live mode, routes to LI.FI API for current prices. In backtest mode, routes to historical data with strict lookahead prevention (only data up to current simulated timestamp). Exposes a `ready` gate that blocks controller execution until all data sources are connected. Token prices cached with 30s TTL. Builds `StrategyContext` objects containing balances, positions, prices, active transfers, and market microstructure data (order book depth, volume analytics, funding rates, open interest, cross-asset correlations).
 
 ## Risk Management
 
 ### Triple Barrier
 
-Every position has three barriers (Hummingbot pattern): stop-loss (fractional), take-profit (fractional), time-limit (seconds). Extended with cross-chain barriers: gas ceiling (max USD), slippage threshold, bridge timeout. Evaluated in priority order: custom exit hook → exit signal → stoploss → ROI targets → trailing stop. `customStoploss()` callback enables dynamic per-trade adjustment. Trailing stop activates at a profit threshold and trails behind current price.
+Every position has three barriers: stop-loss (fractional), take-profit (fractional), time-limit (seconds). Extended with cross-chain barriers: gas ceiling (max USD), slippage threshold, bridge timeout. Evaluated in priority order: custom exit hook → exit signal → stoploss → ROI targets → trailing stop. `customStoploss()` callback enables dynamic per-trade adjustment. Trailing stop activates at a profit threshold and trails behind current price.
 
 ### Portfolio Tier Allocation
 
@@ -195,7 +174,7 @@ Monitors Twitter/X posts from configurable influencer lists (50+ accounts), toke
 
 ### Signal Matrix
 
-OctoBot-inspired multi-evaluator weighted scoring. Four evaluators (OnChain, Market, Social, Technical) each return a score from -1 (strongly bearish) to +1 (strongly bullish) with a confidence weight. Composite score: `sum(score[i] * weight[i]) / sum(weight[i])`. Weights are configurable per evaluator per strategy. Produces a recommendation: `strong_buy`, `buy`, `neutral`, `sell`, `strong_sell`.
+Multi-evaluator weighted scoring. Four evaluators (OnChain, Market, Social, Technical) each return a score from -1 (strongly bearish) to +1 (strongly bullish) with a confidence weight. Composite score: `sum(score[i] * weight[i]) / sum(weight[i])`. Weights are configurable per evaluator per strategy. Produces a recommendation: `strong_buy`, `buy`, `neutral`, `sell`, `strong_sell`.
 
 ## Statistical Arbitrage
 
@@ -213,7 +192,7 @@ Continuously checks Z-scores on eligible pairs. Entry: |Z| ≥ 1.5. Exit: |Z| �
 
 ### Leverage Selection
 
-x23 for ultra-high confidence (correlation > 0.87, |Z| > 2.5, low spread volatility). x18 for high confidence (correlation > 0.85, |Z| > 2.0) — default matching Agent Pear's usage pattern. x9 for moderate confidence (correlation > 0.82, |Z| > 1.7). x5 for lower confidence (minimum thresholds met). Capped by `config.hyperliquid.maxLeverage`.
+x23 for ultra-high confidence (correlation > 0.87, |Z| > 2.5, low spread volatility). x18 for high confidence (correlation > 0.85, |Z| > 2.0) — default. x9 for moderate confidence (correlation > 0.82, |Z| > 1.7). x5 for lower confidence (minimum thresholds met). Capped by `config.hyperliquid.maxLeverage`.
 
 ### Beta-Neutral Sizing
 
@@ -239,7 +218,7 @@ Regex-based extraction tolerant of formatting variations. Open signals extract: 
 
 ### Confidence Scoring
 
-Telegram signals get base confidence of 0.66 (Agent Pear's observed win rate), adjusted by Z-score extremity, correlation strength, and signal freshness. Native stat arb signals scored by statistical strength. When both sources signal the same pair, the higher-confidence signal is kept.
+Telegram signals get a base confidence score adjusted by Z-score extremity, correlation strength, and signal freshness. Native stat arb signals scored by statistical strength. When both sources signal the same pair, the higher-confidence signal is kept.
 
 ## Hyperliquid Integration
 
@@ -259,7 +238,7 @@ Each OODA cycle compares Hyperliquid margin balance + unrealized P&L against int
 
 ### Backtesting Engine
 
-Replays historical data through the same OODA loop as live mode. `SimulatedLiFiConnector` returns simulated quotes with configurable slippage and fee modeling — no API calls. `HistoricalDataLoader` parses CSV/JSON historical price, APY, and volume data. Strict lookahead prevention ensures strategies only see data up to current simulated timestamp. `store.reset()` between runs for isolation.
+Replays historical data through the same OODA loop as live mode. `SimulatedLiFiConnector` returns simulated quotes with configurable slippage and fee modeling — no API calls. `HistoricalDataLoader` parses CSV/JSON historical price, APY, and volume data. Strict lookahead prevention ensures strategies only see data up to current simulated timestamp.
 
 ### Performance Analytics
 
@@ -275,7 +254,7 @@ ChainScout monitors chain ecosystem health: TVL inflow rate, new protocol deploy
 
 ## Solana Integration
 
-`SolanaConnector` via `@solana/web3.js` for SOL/SPL token queries and transactions. Jupiter DEX integration for best-price Solana swaps. LI.FI bridges between EVM and Solana using chain ID 1151111081099710. Both EVM private key and Solana keypair loaded from env vars. State store uses same composite key pattern with Solana's chain ID. Waits for `confirmed` commitment level on Solana transactions.
+Solana connector for SOL/SPL token queries and transactions. Jupiter DEX integration for best-price Solana swaps. LI.FI bridges between EVM and Solana. Both EVM private key and Solana keypair loaded from env vars. State store uses same composite key pattern with Solana's chain ID. Waits for `confirmed` commitment level on Solana transactions.
 
 ## Flash Strategies
 
@@ -389,14 +368,6 @@ Error recovery options presented to users: retry with adjusted parameters, hold 
 - Destination addresses from LI.FI quotes validated against known contracts before signing
 - Wallet chain ID verified against requested chain before every signing operation
 - Solana program IDs validated against allowlist before signing SPL transactions
-
-## Scripts
-
-`npm run dev` — tsx watch mode. `npm run build` — tsc compile. `npm start` — run compiled output. `npm test` — vitest run. `npm run lint` — tsc --noEmit.
-
-## Tests
-
-32 test files covering config validation, branded types, action queue, store events, HTTP client retry/error classification, status parsing/polling, executor orchestration, pre-flight checks, approval handling, transaction execution, persistence, REST/WS servers, and transfer tracking.
 
 ## License
 
