@@ -20,6 +20,16 @@ export const WS_EVENT_TYPES = {
   // Command responses
   COMMAND_RESPONSE: 'command.response',
   COMMAND_ERROR: 'command.error',
+  // AI events
+  AI_REGIME_CHANGED: 'ai.regime.changed',
+  AI_REGIME_DETECTION_FAILED: 'ai.regime.detection_failed',
+  AI_STRATEGY_SELECTION_CHANGED: 'ai.strategy.selection_changed',
+  // Confirmation events
+  CONFIRMATION_REQUEST: 'confirmation.request',
+  CONFIRMATION_RESPONSE: 'confirmation.response',
+  // Recovery events
+  RECOVERY_OPTIONS: 'recovery.options',
+  RECOVERY_SELECTION: 'recovery.selection',
 } as const;
 
 export type WsEventType = (typeof WS_EVENT_TYPES)[keyof typeof WS_EVENT_TYPES];

@@ -14,6 +14,11 @@ import type {
   TransferStatus,
 } from './types.js';
 import { transferId } from './types.js';
+import type {
+  RegimeClassification,
+  DecisionReport,
+  ReportFilter,
+} from '../ai/types.js';
 
 const logger = createLogger('store');
 
@@ -25,6 +30,9 @@ export type StoreEventMap = {
   'transfer.completed': [CompletedTransfer];
   'position.updated': [Position];
   'price.updated': [PriceEntry];
+  'regime_changed': [RegimeClassification];
+  'regime_detection_failed': [{ error: string; timestamp: number }];
+  'strategy_selection_changed': [{ previous: string[]; current: string[]; regime: string }];
 };
 
 export type StoreEventName = keyof StoreEventMap;
@@ -61,6 +69,11 @@ export class Store {
   private readonly prices: Map<string, PriceEntry>;
   private readonly trades: Map<string, Trade>;
 
+  // --- AI slices ---
+  private currentRegime: RegimeClassification | null;
+  private readonly regimeHistory: RegimeClassification[];
+  private readonly decisionReports: DecisionReport[];
+
   private constructor() {
     this.emitter = new EventEmitter();
     this.balances = new Map();
@@ -69,6 +82,9 @@ export class Store {
     this.positions = new Map();
     this.prices = new Map();
     this.trades = new Map();
+    this.currentRegime = null;
+    this.regimeHistory = [];
+    this.decisionReports = [];
   }
 
   static getInstance(): Store {
@@ -288,6 +304,89 @@ export class Store {
     return Array.from(this.trades.values());
   }
 
+  // --- Regime classification methods ---
+
+  setRegimeClassification(classification: RegimeClassification): void {
+    this.currentRegime = classification;
+    this.regimeHistory.push(classification);
+
+    // Cap history at 100 entries
+    const maxHistory = 100;
+    if (this.regimeHistory.length > maxHistory) {
+      this.regimeHistory.splice(0, this.regimeHistory.length - maxHistory);
+    }
+
+    logger.debug(
+      { regime: classification.regime, confidence: classification.confidence },
+      'Regime classification stored',
+    );
+  }
+
+  getLatestRegime(): RegimeClassification | null {
+    return this.currentRegime;
+  }
+
+  getRegimeHistory(limit?: number): RegimeClassification[] {
+    if (limit !== undefined && limit > 0) {
+      return this.regimeHistory.slice(-limit);
+    }
+    return [...this.regimeHistory];
+  }
+
+  // --- Decision report methods ---
+
+  addReport(report: DecisionReport): void {
+    this.decisionReports.push(report);
+
+    // Cap at 1000 reports, evict oldest first
+    const maxReports = 1000;
+    if (this.decisionReports.length > maxReports) {
+      this.decisionReports.splice(0, this.decisionReports.length - maxReports);
+    }
+
+    logger.debug(
+      { reportId: report.id, strategy: report.strategyName, outcome: report.outcome },
+      'Decision report stored',
+    );
+  }
+
+  updateReportOutcome(reportId: string, outcome: DecisionReport['outcome'], reason?: string): void {
+    const report = this.decisionReports.find((r) => r.id === reportId);
+    if (!report) {
+      logger.warn({ reportId }, 'Attempted to update non-existent decision report');
+      return;
+    }
+    report.outcome = outcome;
+    if (reason) {
+      report.narrative = `${report.narrative}\n\nOutcome update: ${reason}`;
+    }
+  }
+
+  getReports(filter?: ReportFilter): DecisionReport[] {
+    let results = [...this.decisionReports];
+
+    if (filter?.strategyName) {
+      results = results.filter((r) => r.strategyName === filter.strategyName);
+    }
+    if (filter?.outcome) {
+      results = results.filter((r) => r.outcome === filter.outcome);
+    }
+    if (filter?.fromTimestamp) {
+      results = results.filter((r) => r.timestamp >= filter.fromTimestamp!);
+    }
+    if (filter?.toTimestamp) {
+      results = results.filter((r) => r.timestamp <= filter.toTimestamp!);
+    }
+
+    // Sort by timestamp descending (most recent first)
+    results.sort((a, b) => b.timestamp - a.timestamp);
+
+    // Pagination
+    const offset = filter?.offset ?? 0;
+    const limit = filter?.limit ?? 50;
+    return results.slice(offset, offset + limit);
+  }
+
   // --- Restore (for crash recovery) ---
 
   restoreTransfer(transfer: InFlightTransfer): void {
@@ -304,6 +403,9 @@ export class Store {
     this.positions.clear();
     this.prices.clear();
     this.trades.clear();
+    this.currentRegime = null;
+    this.regimeHistory.length = 0;
+    this.decisionReports.length = 0;
     this.emitter.removeAllListeners();
     Store.instance = null;
     logger.debug('Store reset');

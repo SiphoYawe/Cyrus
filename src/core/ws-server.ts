@@ -23,6 +23,9 @@ const STORE_EVENT_MAP: Record<StoreEventName, string> = {
   'transfer.completed': WS_EVENT_TYPES.STATE_TRANSFER_COMPLETED,
   'position.updated': WS_EVENT_TYPES.STATE_POSITION_UPDATED,
   'price.updated': WS_EVENT_TYPES.STATE_PRICE_UPDATED,
+  'regime_changed': WS_EVENT_TYPES.AI_REGIME_CHANGED,
+  'regime_detection_failed': WS_EVENT_TYPES.AI_REGIME_DETECTION_FAILED,
+  'strategy_selection_changed': WS_EVENT_TYPES.AI_STRATEGY_SELECTION_CHANGED,
 };
 
 // Valid command values for validation

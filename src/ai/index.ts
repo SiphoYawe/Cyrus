@@ -1,0 +1,31 @@
+export { AIOrchestrator } from './ai-orchestrator.js';
+export type { AIOrchestatorOptions } from './ai-orchestrator.js';
+
+export type {
+  MarketRegime,
+  RegimeClassification,
+  StrategyTier,
+  StrategySelectionResult,
+  CommandIntent,
+  NLExecutionStep,
+  NLExecutionPlan,
+  CommandParseResult,
+  OutcomeClassification,
+  DecisionContext,
+  DecisionReport,
+  ReportFilter,
+  CostEstimate,
+  PreviewStep,
+  Preview,
+  ConfirmationDecision,
+  ErrorClassification,
+  RiskLevel,
+  RecoveryOption,
+  ErrorContext,
+  RetryParams,
+  BridgeBackParams,
+  DepositParams,
+  RecoveryStrategy,
+  RankedOpportunity,
+  EvaluationContext,
+} from './types.js';
