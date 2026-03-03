@@ -5,6 +5,15 @@ export { PortfolioTierEngine } from './portfolio-tier-engine.js';
 export { calculateKellyFraction, calculatePositionSize, KELLY_SAFETY_CAP } from './kelly-criterion.js';
 export { DrawdownCircuitBreaker } from './circuit-breaker.js';
 export type { CircuitBreakerCloseAction, CircuitBreakerEventEmitter, PositionTierResolver } from './circuit-breaker.js';
+export {
+  calculateTierAllocation,
+  toTierConfigs,
+  RiskDialManager,
+  DIAL_1_ALLOCATION,
+  DIAL_5_ALLOCATION,
+  DIAL_10_ALLOCATION,
+} from './risk-dial.js';
+export type { RebalancingPlan, RiskDialChangedEvent, RiskDialEventEmitter } from './risk-dial.js';
 export type {
   BarrierConfig,
   BarrierCloseReason,
