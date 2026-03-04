@@ -17,7 +17,7 @@ function Cancel01Svg({ size }: { size?: number }) {
 function TrendUpSvg({ size }: { size?: number }) {
   const s = size ?? 14;
   return (
-    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg data-testid="trend-up-icon" width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M3 17L9 11L13 15L21 7" />
       <path d="M16 7H21V12" />
     </svg>

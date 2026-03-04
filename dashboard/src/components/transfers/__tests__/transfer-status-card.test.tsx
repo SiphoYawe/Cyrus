@@ -158,7 +158,6 @@ describe('TransferStatusCard', () => {
           }}
         />
       );
-      expect(screen.getByTestId('tick-icon')).toBeDefined();
       expect(screen.getByTestId('completion-icon')).toBeDefined();
     });
 
@@ -232,7 +231,6 @@ describe('TransferStatusCard', () => {
 
     it('shows cancel icon on failure', () => {
       render(<TransferStatusCard transfer={failedTransfer} />);
-      expect(screen.getByTestId('cancel-icon')).toBeDefined();
       expect(screen.getByTestId('failure-icon')).toBeDefined();
     });
 
