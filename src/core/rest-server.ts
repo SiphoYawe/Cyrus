@@ -111,4 +111,9 @@ export class AgentRestServer {
     }
     return this.port;
   }
+
+  /** Exposes the underlying HTTP server for WebSocket attachment. */
+  get httpServer(): Server {
+    return this.server;
+  }
 }

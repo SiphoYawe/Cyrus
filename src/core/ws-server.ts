@@ -39,13 +39,15 @@ const VALID_COMMANDS = new Set<string>(Object.values(WS_COMMANDS));
 const aliveMap = new WeakMap<WebSocket, boolean>();
 
 export interface AgentWebSocketServerOptions {
-  port: number;
+  port?: number;
+  httpServer?: import('node:http').Server;
 }
 
 type CommandHandler = (payload: unknown) => Promise<unknown>;
 
 export class AgentWebSocketServer {
-  private readonly port: number;
+  private readonly port: number | undefined;
+  private readonly httpServer: import('node:http').Server | undefined;
   private server: WebSocketServer | null = null;
   private readonly clients: Set<WebSocket> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -55,12 +57,30 @@ export class AgentWebSocketServer {
 
   constructor(options: AgentWebSocketServerOptions) {
     this.port = options.port;
+    this.httpServer = options.httpServer;
   }
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        this.server = new WebSocketServer({ port: this.port });
+        // If an HTTP server is provided, attach WS to it (shared port).
+        // Otherwise, create a standalone WS server on its own port.
+        const wsOptions = this.httpServer
+          ? { server: this.httpServer }
+          : { port: this.port ?? 8080 };
+
+        this.server = new WebSocketServer(wsOptions);
+
+        if (this.httpServer) {
+          // Already listening via the HTTP server — just set up handlers
+          logger.info('WebSocket server attached to HTTP server (shared port)');
+          this.startHeartbeat();
+          this.server.on('connection', (ws: WebSocket) => {
+            this.handleConnection(ws);
+          });
+          resolve();
+          return;
+        }
 
         this.server.on('listening', () => {
           const addr = this.server!.address();
@@ -172,7 +192,7 @@ export class AgentWebSocketServer {
         return addr.port;
       }
     }
-    return this.port;
+    return this.port ?? 0;
   }
 
   private handleConnection(ws: WebSocket): void {

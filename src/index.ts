@@ -49,13 +49,14 @@ async function main(): Promise<void> {
     config,
   });
 
-  // 6. WebSocket server
+  // Start REST first so HTTP server is listening
+  await restServer.start();
+
+  // 6. WebSocket server — attach to same HTTP server (single port for Railway/cloud)
   const wsServer = new AgentWebSocketServer({
-    port: config.ws.port,
+    httpServer: restServer.httpServer,
   });
 
-  // Start servers
-  await restServer.start();
   await wsServer.start();
   wsServer.subscribeToStore(store);
 
