@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 function Tick02Svg({ size, color }: { size?: number; color?: string }) {
   const s = size ?? 20;
   return (
-    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={color ?? 'currentColor'} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg data-testid="tick-icon" width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={color ?? 'currentColor'} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M4 13L9 18L20 7" />
     </svg>
   );
@@ -13,7 +13,7 @@ function Tick02Svg({ size, color }: { size?: number; color?: string }) {
 function Cancel01Svg({ size, color }: { size?: number; color?: string }) {
   const s = size ?? 16;
   return (
-    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={color ?? 'currentColor'} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg data-testid="cancel-icon" width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={color ?? 'currentColor'} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M6 18L18 6M6 6L18 18" />
     </svg>
   );

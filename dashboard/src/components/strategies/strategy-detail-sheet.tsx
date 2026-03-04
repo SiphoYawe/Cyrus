@@ -12,7 +12,6 @@ import {
 } from '@/components/ui/sheet';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -341,19 +340,28 @@ export function StrategyDetailSheet({
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between">
                 <h4 className="text-sm font-semibold text-foreground">Performance</h4>
-                <Tabs value={timeRange} onValueChange={(v) => onTimeRangeChange(v as TimeRange)}>
-                  <TabsList className="h-7 gap-0 p-0.5">
-                    {TIME_RANGES.map((range) => (
-                      <TabsTrigger
-                        key={range}
-                        value={range}
-                        className="h-6 px-2 text-[11px]"
-                      >
-                        {range}
-                      </TabsTrigger>
-                    ))}
-                  </TabsList>
-                </Tabs>
+                <div
+                  role="group"
+                  aria-label="Time range"
+                  className="inline-flex items-center rounded-lg bg-muted p-0.5 h-7"
+                >
+                  {TIME_RANGES.map((range) => (
+                    <button
+                      key={range}
+                      type="button"
+                      onClick={() => onTimeRangeChange(range)}
+                      aria-pressed={timeRange === range}
+                      className={cn(
+                        'h-6 px-2 text-[11px] rounded-md font-medium transition-all',
+                        timeRange === range
+                          ? 'bg-background text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {range}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {isLoading ? (
