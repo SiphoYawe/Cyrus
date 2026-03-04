@@ -26,6 +26,10 @@ const STORE_EVENT_MAP: Record<StoreEventName, string> = {
   'regime_changed': WS_EVENT_TYPES.AI_REGIME_CHANGED,
   'regime_detection_failed': WS_EVENT_TYPES.AI_REGIME_DETECTION_FAILED,
   'strategy_selection_changed': WS_EVENT_TYPES.AI_STRATEGY_SELECTION_CHANGED,
+  'stat_arb_signal': WS_EVENT_TYPES.STAT_ARB_SIGNAL,
+  'stat_arb_position_opened': WS_EVENT_TYPES.STAT_ARB_POSITION_OPENED,
+  'stat_arb_position_closed': WS_EVENT_TYPES.STAT_ARB_POSITION_CLOSED,
+  'stat_arb_exit_signal': WS_EVENT_TYPES.STAT_ARB_EXIT_SIGNAL,
 };
 
 // Valid command values for validation

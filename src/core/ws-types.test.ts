@@ -54,8 +54,8 @@ describe('ws-types', () => {
       expect(WS_EVENT_TYPES.COMMAND_ERROR).toBe('command.error');
     });
 
-    it('has 19 total event types', () => {
-      expect(Object.keys(WS_EVENT_TYPES)).toHaveLength(19);
+    it('has 23 total event types', () => {
+      expect(Object.keys(WS_EVENT_TYPES)).toHaveLength(23);
     });
 
     it('values are assignable to WsEventType', () => {

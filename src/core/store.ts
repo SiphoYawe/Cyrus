@@ -19,6 +19,19 @@ import type {
   DecisionReport,
   ReportFilter,
 } from '../ai/types.js';
+import type {
+  StatArbSignal,
+  StatArbPosition,
+  StatArbCloseData,
+  SignalCountStats,
+} from './store-slices/stat-arb-slice.js';
+import {
+  STAT_ARB_SIGNAL_EVENT,
+  STAT_ARB_POSITION_OPENED_EVENT,
+  STAT_ARB_POSITION_CLOSED_EVENT,
+  STAT_ARB_EXIT_SIGNAL_EVENT,
+  isSignalExpired,
+} from './store-slices/stat-arb-slice.js';
 
 const logger = createLogger('store');
 
@@ -33,6 +46,10 @@ export type StoreEventMap = {
   'regime_changed': [RegimeClassification];
   'regime_detection_failed': [{ error: string; timestamp: number }];
   'strategy_selection_changed': [{ previous: string[]; current: string[]; regime: string }];
+  'stat_arb_signal': [StatArbSignal];
+  'stat_arb_position_opened': [StatArbPosition];
+  'stat_arb_position_closed': [StatArbPosition];
+  'stat_arb_exit_signal': [import('./store-slices/stat-arb-slice.js').StatArbExitSignal];
 };
 
 export type StoreEventName = keyof StoreEventMap;
@@ -74,6 +91,11 @@ export class Store {
   private readonly regimeHistory: RegimeClassification[];
   private readonly decisionReports: DecisionReport[];
 
+  // --- Stat arb slices ---
+  private readonly statArbSignals: Map<string, StatArbSignal>;
+  private readonly activeStatArbPositions: Map<string, StatArbPosition>;
+  private readonly completedStatArbPositions: Map<string, StatArbPosition>;
+
   private constructor() {
     this.emitter = new EventEmitter();
     this.balances = new Map();
@@ -85,6 +107,9 @@ export class Store {
     this.currentRegime = null;
     this.regimeHistory = [];
     this.decisionReports = [];
+    this.statArbSignals = new Map();
+    this.activeStatArbPositions = new Map();
+    this.completedStatArbPositions = new Map();
   }
 
   static getInstance(): Store {
@@ -387,6 +412,146 @@ export class Store {
     return results.slice(offset, offset + limit);
   }
 
+  // --- Stat arb signal methods ---
+
+  addStatArbSignal(signal: StatArbSignal): void {
+    this.statArbSignals.set(signal.pair.key, signal);
+    this.emitter.emit(STAT_ARB_SIGNAL_EVENT, signal);
+    logger.debug({ pairKey: signal.pair.key, direction: signal.direction, zScore: signal.zScore }, 'Stat arb signal added');
+  }
+
+  getSignalByPairKey(pairKey: string): StatArbSignal | undefined {
+    return this.statArbSignals.get(pairKey);
+  }
+
+  getPendingSignals(): StatArbSignal[] {
+    return Array.from(this.statArbSignals.values()).filter(
+      (s) => !s.consumed && !isSignalExpired(s),
+    );
+  }
+
+  markSignalConsumed(pairKey: string): boolean {
+    const signal = this.statArbSignals.get(pairKey);
+    if (!signal) return false;
+    signal.consumed = true;
+    return true;
+  }
+
+  removeSignal(pairKey: string): boolean {
+    return this.statArbSignals.delete(pairKey);
+  }
+
+  pruneExpiredSignals(): number {
+    let pruned = 0;
+    for (const [key, signal] of this.statArbSignals) {
+      if (isSignalExpired(signal)) {
+        this.statArbSignals.delete(key);
+        pruned++;
+      }
+    }
+    if (pruned > 0) {
+      logger.debug({ pruned }, 'Pruned expired stat arb signals');
+    }
+    return pruned;
+  }
+
+  getSignalCount(): SignalCountStats {
+    let pending = 0;
+    let consumed = 0;
+    let expired = 0;
+    const now = Date.now();
+    for (const signal of this.statArbSignals.values()) {
+      if (now > signal.expiresAt) {
+        expired++;
+      } else if (signal.consumed) {
+        consumed++;
+      } else {
+        pending++;
+      }
+    }
+    return { total: this.statArbSignals.size, pending, consumed, expired };
+  }
+
+  getAllStatArbSignals(): StatArbSignal[] {
+    return Array.from(this.statArbSignals.values());
+  }
+
+  // --- Stat arb position methods ---
+
+  openStatArbPosition(position: StatArbPosition): void {
+    this.activeStatArbPositions.set(position.positionId, position);
+    this.emitter.emit(STAT_ARB_POSITION_OPENED_EVENT, position);
+    logger.info(
+      { positionId: position.positionId, pair: position.pair.key, direction: position.direction },
+      'Stat arb position opened',
+    );
+  }
+
+  closeStatArbPosition(positionId: string, closeData: StatArbCloseData): void {
+    const position = this.activeStatArbPositions.get(positionId);
+    if (!position) {
+      throw new Error(`Cannot close non-existent stat arb position: ${positionId}`);
+    }
+
+    // Update position with close data
+    const closedPosition: StatArbPosition = {
+      ...position,
+      status: 'closed' as const,
+      closeReason: closeData.reason,
+      closeTimestamp: closeData.closeTimestamp,
+      closePnl: closeData.closePnl,
+      combinedPnl: closeData.closePnl,
+      legA: { ...position.legA, currentPrice: closeData.legAClosePrice },
+      legB: { ...position.legB, currentPrice: closeData.legBClosePrice },
+    };
+
+    // Move from active to completed
+    this.activeStatArbPositions.delete(positionId);
+    this.completedStatArbPositions.set(positionId, closedPosition);
+    this.emitter.emit(STAT_ARB_POSITION_CLOSED_EVENT, closedPosition);
+    logger.info(
+      { positionId, reason: closeData.reason, pnl: closeData.closePnl },
+      'Stat arb position closed',
+    );
+  }
+
+  getActiveStatArbPosition(positionId: string): StatArbPosition | undefined {
+    return this.activeStatArbPositions.get(positionId);
+  }
+
+  getActivePositionByPairKey(pairKey: string): StatArbPosition | undefined {
+    for (const position of this.activeStatArbPositions.values()) {
+      if (position.pair.key === pairKey) return position;
+    }
+    return undefined;
+  }
+
+  getAllActiveStatArbPositions(): StatArbPosition[] {
+    return Array.from(this.activeStatArbPositions.values());
+  }
+
+  getCompletedStatArbPositions(): StatArbPosition[] {
+    return Array.from(this.completedStatArbPositions.values());
+  }
+
+  updateStatArbPositionPnl(
+    positionId: string,
+    combinedPnl: number,
+    accumulatedFunding: number,
+  ): void {
+    const position = this.activeStatArbPositions.get(positionId);
+    if (!position) {
+      logger.warn({ positionId }, 'Attempted to update PnL on non-existent stat arb position');
+      return;
+    }
+    position.combinedPnl = combinedPnl;
+    position.accumulatedFunding = accumulatedFunding;
+  }
+
+  getActiveStatArbPositionCount(): number {
+    return this.activeStatArbPositions.size;
+  }
+
   // --- Restore (for crash recovery) ---
 
   restoreTransfer(transfer: InFlightTransfer): void {
@@ -406,6 +571,9 @@ export class Store {
     this.currentRegime = null;
     this.regimeHistory.length = 0;
     this.decisionReports.length = 0;
+    this.statArbSignals.clear();
+    this.activeStatArbPositions.clear();
+    this.completedStatArbPositions.clear();
     this.emitter.removeAllListeners();
     Store.instance = null;
     logger.debug('Store reset');

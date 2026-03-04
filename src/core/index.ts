@@ -112,3 +112,27 @@ export type {
 export { TerminalStatusHandler } from './terminal-handlers.js';
 
 export { TransferTracker } from './transfer-tracker.js';
+
+export {
+  createPairKey,
+  parsePairKey,
+  isSignalExpired,
+  calculateStoplossBreached,
+  STAT_ARB_SIGNAL_EVENT,
+  STAT_ARB_POSITION_OPENED_EVENT,
+  STAT_ARB_POSITION_CLOSED_EVENT,
+  STAT_ARB_EXIT_SIGNAL_EVENT,
+} from './store-slices/stat-arb-slice.js';
+export type {
+  StatArbDirection,
+  StatArbSignalSource,
+  StatArbExitReason,
+  StatArbPositionStatus,
+  StatArbPair,
+  StatArbSignal,
+  StatArbExitSignal,
+  StatArbLeg,
+  StatArbPosition,
+  StatArbCloseData,
+  SignalCountStats,
+} from './store-slices/stat-arb-slice.js';
