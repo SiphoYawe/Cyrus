@@ -368,7 +368,7 @@ export class PairTradePnl {
 
     for (const row of rows) {
       const values = headers.map((h) => {
-        const val = (row as Record<string, unknown>)[h];
+        const val = (row as unknown as Record<string, unknown>)[h];
         if (val === null || val === undefined) return '';
         if (typeof val === 'string' && val.includes(',')) return `"${val}"`;
         return String(val);
