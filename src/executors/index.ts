@@ -53,3 +53,11 @@ export type { FlashWalletClient } from './flash-executor.js';
 // Stat arb pair executor
 export { StatArbPairExecutor } from './stat-arb-pair-executor.js';
 export type { StatArbPairExecutorConfig } from './stat-arb-pair-executor.js';
+
+// Pair position manager
+export { PairPositionManager } from './pair-position-manager.js';
+export type {
+  PairCloseResult,
+  ExitEvaluation,
+  PairPositionManagerConfig,
+} from './pair-position-manager.js';
