@@ -109,3 +109,16 @@ export { JupiterClient, JupiterClientError } from './jupiter-client.js';
 // Wallet manager
 export { WalletManager, WalletManagerError } from './wallet-manager.js';
 export type { WalletManagerConfig } from './wallet-manager.js';
+
+// Hyperliquid order manager
+export { HyperliquidOrderManager } from './hyperliquid-order-manager.js';
+export type {
+  PerpOrderParams,
+  PerpOrderResult,
+  PerpOrderCancelResult,
+  PerpOrderStatus,
+  OrderSide,
+  OrderType,
+  TimeInForce,
+  OrderStatus,
+} from './hyperliquid-order-manager.js';
