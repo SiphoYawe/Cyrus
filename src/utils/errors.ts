@@ -96,6 +96,47 @@ export class RateLimitError extends CyrusError {
   }
 }
 
+export class HyperliquidApiError extends CyrusError {
+  constructor(context: {
+    statusCode: number;
+    statusText: string;
+    requestType?: string;
+    endpoint?: string;
+  }) {
+    super(
+      `Hyperliquid API error: ${context.statusCode} ${context.statusText}`,
+      context,
+    );
+  }
+}
+
+export class HyperliquidOrderError extends CyrusError {
+  constructor(context: {
+    symbol: string;
+    side: string;
+    size: string;
+    error: string;
+  }) {
+    super(
+      `Hyperliquid order failed for ${context.symbol} ${context.side}: ${context.error}`,
+      context,
+    );
+  }
+}
+
+export class PerpExecutionError extends CyrusError {
+  constructor(context: {
+    symbol: string;
+    stage: string;
+    reason: string;
+  }) {
+    super(
+      `Perp execution failed at ${context.stage} for ${context.symbol}: ${context.reason}`,
+      context,
+    );
+  }
+}
+
 export class StrategyConfigError extends CyrusError {
   readonly field: string;
   readonly value: unknown;

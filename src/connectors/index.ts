@@ -46,3 +46,26 @@ export type { StatusUpdate, StatusTokenInfo, StatusTransferInfo } from './status
 // Status poller
 export { StatusPoller } from './status-poller.js';
 export type { PollParams, StatusPollerOptions } from './status-poller.js';
+
+// Hyperliquid connector
+export { HyperliquidConnector } from './hyperliquid-connector.js';
+export type {
+  HyperliquidConnectorInterface,
+} from './hyperliquid-connector.js';
+
+// Hyperliquid types
+export type {
+  HyperliquidBalance,
+  HyperliquidPosition,
+  HyperliquidOrder,
+  FundingRate,
+  FundingRateMap,
+  OpenInterest,
+  OpenInterestMap,
+  OrderBook,
+  OrderBookLevel,
+  HyperliquidOrderResult,
+  HyperliquidFill,
+  PerpPosition,
+  HyperliquidConnectorConfig,
+} from './hyperliquid-types.js';

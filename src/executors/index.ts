@@ -29,3 +29,7 @@ export {
   isSupportedProtocol,
 } from './composer-registry.js';
 export type { SupportedProtocol, ProtocolInfo } from './composer-registry.js';
+
+// Perp executor
+export { PerpExecutor } from './perp-executor.js';
+export type { PerpExecutorConfig } from './perp-executor.js';

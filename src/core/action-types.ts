@@ -5,6 +5,9 @@ export const ACTION_TYPES = {
   BRIDGE: 'bridge',
   COMPOSER: 'composer',
   REBALANCE: 'rebalance',
+  PERP: 'perp',
+  PAIR: 'pair',
+  MARKET_MAKE: 'market_make',
 } as const;
 
 export type ActionType = (typeof ACTION_TYPES)[keyof typeof ACTION_TYPES];
@@ -56,4 +59,43 @@ export interface RebalanceAction extends BaseAction {
   readonly metadata: Record<string, unknown>;
 }
 
-export type ExecutorAction = SwapAction | BridgeAction | ComposerAction | RebalanceAction;
+export interface PerpAction extends BaseAction {
+  readonly type: 'perp';
+  readonly symbol: string;
+  readonly side: 'long' | 'short';
+  readonly size: bigint;
+  readonly leverage: number;
+  readonly orderType: 'market' | 'limit';
+  readonly limitPrice?: number;
+  readonly timeInForce?: 'GTC' | 'IOC' | 'FOK';
+  readonly metadata: Record<string, unknown>;
+}
+
+export interface PairAction extends BaseAction {
+  readonly type: 'pair';
+  readonly pairId: string;
+  readonly longSymbol: string;
+  readonly shortSymbol: string;
+  readonly longSize: bigint;
+  readonly shortSize: bigint;
+  readonly leverage: number;
+  readonly metadata: Record<string, unknown>;
+}
+
+export interface MarketMakeAction extends BaseAction {
+  readonly type: 'market_make';
+  readonly symbol: string;
+  readonly spread: number;
+  readonly orderSize: bigint;
+  readonly levels: number;
+  readonly metadata: Record<string, unknown>;
+}
+
+export type ExecutorAction =
+  | SwapAction
+  | BridgeAction
+  | ComposerAction
+  | RebalanceAction
+  | PerpAction
+  | PairAction
+  | MarketMakeAction;
