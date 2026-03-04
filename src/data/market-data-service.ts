@@ -1,8 +1,20 @@
 import { createLogger } from '../utils/logger.js';
 import { PriceCache } from './price-cache.js';
+import { TtlCache } from './ttl-cache.js';
 import { Store } from '../core/store.js';
 import type { ChainId, TokenAddress, StrategyContext, AgentMode } from '../core/types.js';
 import type { LiFiConnectorInterface } from '../connectors/types.js';
+import type {
+  MarketOrderBook,
+  MarketOrderBookLevel,
+  VolumeMetrics,
+  VolatilityMetrics,
+  FundingRateData,
+  OpenInterestData,
+  CorrelationResult,
+  MarketMicrostructure,
+  PriceCandle,
+} from './market-data-types.js';
 
 const logger = createLogger('market-data');
 
@@ -30,6 +42,14 @@ export class MarketDataService {
   private _ready = false;
   private backtestTimestamp: number | null = null;
   private readonly historicalPrices = new Map<string, Map<number, number>>(); // key -> timestamp -> price
+
+  // Enhanced data caches with per-type TTLs
+  private readonly orderBookCache = new TtlCache<MarketOrderBook>(10_000); // 10s
+  private readonly volumeCache = new TtlCache<VolumeMetrics>(60_000); // 60s
+  private readonly volatilityCache = new TtlCache<VolatilityMetrics>(300_000); // 5min
+  private readonly fundingCache = new TtlCache<FundingRateData>(30_000); // 30s
+  private readonly oiCache = new TtlCache<OpenInterestData>(30_000); // 30s
+  private readonly correlationCache = new TtlCache<CorrelationResult>(300_000); // 5min
 
   constructor(options: MarketDataServiceOptions) {
     this.mode = options.mode;
@@ -164,15 +184,261 @@ export class MarketDataService {
     // Get active transfers
     const activeTransfers = this.store.getActiveTransfers();
 
+    // Build microstructure (best-effort, partial data acceptable)
+    const microstructure = await this.buildMicrostructure();
+
     const ctx: StrategyContext = {
       timestamp,
       balances,
       positions,
       prices,
       activeTransfers,
+      microstructure,
     };
 
     return Object.freeze(ctx);
+  }
+
+  // --- Enhanced market data methods ---
+
+  async getOrderBook(market: string): Promise<MarketOrderBook> {
+    const cacheKeyStr = `orderbook-${market}`;
+    const cached = this.orderBookCache.get(cacheKeyStr);
+    if (cached) return cached;
+
+    const data = await this.fetchOrderBook(market);
+    this.orderBookCache.set(cacheKeyStr, data);
+    return data;
+  }
+
+  async getVolume(token: TokenAddress, chain: ChainId, period: string): Promise<VolumeMetrics> {
+    const cacheKeyStr = `volume-${chain as number}-${token as string}-${period}`;
+    const cached = this.volumeCache.get(cacheKeyStr);
+    if (cached) return cached;
+
+    const data = await this.fetchVolume(token, chain, period);
+    this.volumeCache.set(cacheKeyStr, data);
+    return data;
+  }
+
+  async getVolatility(token: TokenAddress, period: string): Promise<VolatilityMetrics> {
+    const cacheKeyStr = `volatility-${token as string}-${period}`;
+    const cached = this.volatilityCache.get(cacheKeyStr);
+    if (cached) return cached;
+
+    const data = await this.fetchVolatility(token, period);
+    this.volatilityCache.set(cacheKeyStr, data);
+    return data;
+  }
+
+  async getFundingRate(market: string): Promise<FundingRateData> {
+    const cacheKeyStr = `funding-${market}`;
+    const cached = this.fundingCache.get(cacheKeyStr);
+    if (cached) return cached;
+
+    const data = await this.fetchFundingRate(market);
+    this.fundingCache.set(cacheKeyStr, data);
+    return data;
+  }
+
+  async getOpenInterest(market: string): Promise<OpenInterestData> {
+    const cacheKeyStr = `oi-${market}`;
+    const cached = this.oiCache.get(cacheKeyStr);
+    if (cached) return cached;
+
+    const data = await this.fetchOpenInterest(market);
+    this.oiCache.set(cacheKeyStr, data);
+    return data;
+  }
+
+  async getCorrelation(tokenA: TokenAddress, tokenB: TokenAddress, period: string): Promise<CorrelationResult> {
+    const cacheKeyStr = `correlation-${tokenA as string}-${tokenB as string}-${period}`;
+    const cached = this.correlationCache.get(cacheKeyStr);
+    if (cached) return cached;
+
+    const data = await this.computeCorrelation(tokenA, tokenB, period);
+    this.correlationCache.set(cacheKeyStr, data);
+    return data;
+  }
+
+  // --- Data source abstractions (mockable in tests) ---
+
+  async fetchOrderBook(market: string): Promise<MarketOrderBook> {
+    // Stub: in production, routes to Hyperliquid for perp or LI.FI for spot
+    const bids: MarketOrderBookLevel[] = [];
+    const asks: MarketOrderBookLevel[] = [];
+    return {
+      market,
+      bids,
+      asks,
+      spread: 0,
+      spreadPercent: 0,
+      midPrice: 0,
+      timestamp: Date.now(),
+    };
+  }
+
+  async fetchVolume(token: TokenAddress, chain: ChainId, period: string): Promise<VolumeMetrics> {
+    // Stub: in production, fetches from DEX subgraphs
+    return {
+      token, chain, period,
+      totalVolume: 0, buyVolume: 0, sellVolume: 0,
+      buySellRatio: 1, volumeVs7dAvg: 1, vwap: 0,
+      timestamp: Date.now(),
+    };
+  }
+
+  async fetchVolatility(token: TokenAddress, period: string): Promise<VolatilityMetrics> {
+    // Stub: in production, computes from historical candles
+    return {
+      token, period,
+      realizedVolatility: 0, atr: 0,
+      bollingerWidth: 0, bollingerUpper: 0, bollingerLower: 0, bollingerMiddle: 0,
+      timestamp: Date.now(),
+    };
+  }
+
+  async fetchFundingRate(market: string): Promise<FundingRateData> {
+    // Stub: in production, fetches from Hyperliquid
+    return {
+      market,
+      currentRate: 0, predictedNextRate: 0, avg7d: 0, annualizedYield: 0,
+      nextFundingTime: Date.now() + 8 * 3600_000,
+      timestamp: Date.now(),
+    };
+  }
+
+  async fetchOpenInterest(market: string): Promise<OpenInterestData> {
+    // Stub: in production, fetches from Hyperliquid
+    return {
+      market,
+      totalOi: 0, totalOiUsd: 0,
+      longRatio: 0.5, shortRatio: 0.5,
+      change24h: 0, change24hPercent: 0,
+      timestamp: Date.now(),
+    };
+  }
+
+  // --- Computation methods ---
+
+  computeCorrelation(tokenA: TokenAddress, tokenB: TokenAddress, period: string): Promise<CorrelationResult> {
+    // Calculate Pearson correlation from price histories
+    const keyA = tokenA as string;
+    const keyB = tokenB as string;
+
+    // Gather aligned price data from historical store
+    const returnsA: number[] = [];
+    const returnsB: number[] = [];
+
+    // In production, this would fetch from a candle store
+    // For now, attempt to use historicalPrices if available
+    const suffixA = `-${keyA}`;
+    const suffixB = `-${keyB}`;
+    for (const [key, timeSeries] of this.historicalPrices) {
+      if (key.endsWith(suffixA)) {
+        const sorted = [...timeSeries.entries()].sort((a, b) => a[0] - b[0]);
+        for (let i = 1; i < sorted.length; i++) {
+          if (sorted[i]![1] > 0 && sorted[i - 1]![1] > 0) {
+            returnsA.push(Math.log(sorted[i]![1] / sorted[i - 1]![1]));
+          }
+        }
+      }
+      if (key.endsWith(suffixB)) {
+        const sorted = [...timeSeries.entries()].sort((a, b) => a[0] - b[0]);
+        for (let i = 1; i < sorted.length; i++) {
+          if (sorted[i]![1] > 0 && sorted[i - 1]![1] > 0) {
+            returnsB.push(Math.log(sorted[i]![1] / sorted[i - 1]![1]));
+          }
+        }
+      }
+    }
+
+    const sampleSize = Math.min(returnsA.length, returnsB.length);
+    const coefficient = sampleSize >= 2
+      ? MarketDataService.pearsonCorrelation(returnsA.slice(0, sampleSize), returnsB.slice(0, sampleSize))
+      : 0;
+
+    // p-value from t-test: t = r * sqrt((n-2)/(1-r^2))
+    let pValue = 1;
+    if (sampleSize > 2 && Math.abs(coefficient) < 1) {
+      const t = coefficient * Math.sqrt((sampleSize - 2) / (1 - coefficient * coefficient));
+      // Approximate p-value using normal distribution for large n
+      pValue = sampleSize > 30 ? 2 * (1 - MarketDataService.normalCdf(Math.abs(t))) : 0.05;
+    }
+
+    return Promise.resolve({
+      tokenA, tokenB, period,
+      coefficient,
+      sampleSize,
+      pValue,
+      timestamp: Date.now(),
+    });
+  }
+
+  static pearsonCorrelation(x: number[], y: number[]): number {
+    const n = x.length;
+    if (n === 0) return 0;
+
+    const meanX = x.reduce((s, v) => s + v, 0) / n;
+    const meanY = y.reduce((s, v) => s + v, 0) / n;
+
+    let cov = 0;
+    let varX = 0;
+    let varY = 0;
+
+    for (let i = 0; i < n; i++) {
+      const dx = x[i]! - meanX;
+      const dy = y[i]! - meanY;
+      cov += dx * dy;
+      varX += dx * dx;
+      varY += dy * dy;
+    }
+
+    const denom = Math.sqrt(varX * varY);
+    return denom === 0 ? 0 : cov / denom;
+  }
+
+  static normalCdf(x: number): number {
+    // Approximation of the standard normal CDF
+    const a1 = 0.254829592;
+    const a2 = -0.284496736;
+    const a3 = 1.421413741;
+    const a4 = -1.453152027;
+    const a5 = 1.061405429;
+    const p = 0.3275911;
+
+    const sign = x < 0 ? -1 : 1;
+    x = Math.abs(x) / Math.sqrt(2);
+
+    const t = 1.0 / (1.0 + p * x);
+    const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+
+    return 0.5 * (1.0 + sign * y);
+  }
+
+  // --- Microstructure builder (best-effort parallel fetch) ---
+
+  private async buildMicrostructure(): Promise<MarketMicrostructure> {
+    const orderBooks = new Map<string, MarketOrderBook>();
+    const volumes = new Map<string, VolumeMetrics>();
+    const volatilities = new Map<string, VolatilityMetrics>();
+    const fundingRates = new Map<string, FundingRateData>();
+    const openInterest = new Map<string, OpenInterestData>();
+    const correlations = new Map<string, CorrelationResult>();
+
+    // Best-effort: strategies populate via individual get* methods.
+    // The microstructure container is provided empty; strategies call
+    // getOrderBook / getVolume / etc. directly for the markets they need.
+    return { orderBooks, volumes, volatilities, fundingRates, openInterest, correlations };
+  }
+
+  invalidateAllEnhanced(): void {
+    this.orderBookCache.clear();
+    this.volumeCache.clear();
+    this.volatilityCache.clear();
+    this.fundingCache.clear();
+    this.oiCache.clear();
+    this.correlationCache.clear();
   }
 
   // --- Backtest ---
@@ -225,5 +491,6 @@ export class MarketDataService {
 
   resetCache(): void {
     this.priceCache.clear();
+    this.invalidateAllEnhanced();
   }
 }
