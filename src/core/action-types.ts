@@ -3,6 +3,7 @@ import type { ChainId, TokenAddress } from './types.js';
 export const ACTION_TYPES = {
   SWAP: 'swap',
   BRIDGE: 'bridge',
+  FUNDING_BRIDGE: 'funding_bridge',
   COMPOSER: 'composer',
   REBALANCE: 'rebalance',
   PERP: 'perp',
@@ -91,6 +92,19 @@ export interface MarketMakeAction extends BaseAction {
   readonly metadata: Record<string, unknown>;
 }
 
+export interface FundingBridgeAction extends BaseAction {
+  readonly type: 'funding_bridge';
+  readonly fromChain: ChainId;
+  readonly toChain: ChainId;
+  readonly fromToken: TokenAddress;
+  readonly toToken: TokenAddress;
+  readonly amount: bigint;
+  readonly fundingBatchId: string;
+  readonly triggeringSignalId: string;
+  readonly depositToHyperliquid: boolean;
+  readonly metadata: Record<string, unknown>;
+}
+
 export type ExecutorAction =
   | SwapAction
   | BridgeAction
@@ -98,4 +112,5 @@ export type ExecutorAction =
   | RebalanceAction
   | PerpAction
   | PairAction
-  | MarketMakeAction;
+  | MarketMakeAction
+  | FundingBridgeAction;
