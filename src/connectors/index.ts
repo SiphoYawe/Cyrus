@@ -69,3 +69,15 @@ export type {
   PerpPosition,
   HyperliquidConnectorConfig,
 } from './hyperliquid-types.js';
+
+// Pear Protocol connector
+export { PearProtocolConnector } from './pear-protocol-connector.js';
+export type {
+  PearProtocolConnectorInterface,
+  PearProtocolConnectorConfig,
+  PearPair,
+  PearPosition,
+  SpreadData,
+  PearMargin,
+  PearOrderResult,
+} from './pear-protocol-connector.js';

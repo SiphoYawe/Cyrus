@@ -33,3 +33,15 @@ export type { SupportedProtocol, ProtocolInfo } from './composer-registry.js';
 // Perp executor
 export { PerpExecutor } from './perp-executor.js';
 export type { PerpExecutorConfig } from './perp-executor.js';
+
+// Market maker executor
+export { MarketMakerExecutor } from './market-maker-executor.js';
+export type {
+  MarketMakerExecutorConfig,
+  ManagedOrder,
+  FillRecord,
+} from './market-maker-executor.js';
+
+// Pair executor
+export { PairExecutor } from './pair-executor.js';
+export type { PairExecutorConfig } from './pair-executor.js';
