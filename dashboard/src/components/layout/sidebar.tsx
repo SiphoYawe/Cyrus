@@ -75,6 +75,26 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    label: 'Analytics',
+    href: '/analytics',
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21.21 15.89A10 10 0 1 1 8 2.83" />
+        <path d="M22 12A10 10 0 0 0 12 2v10z" />
+      </svg>
+    ),
+  },
+  {
+    label: 'Backtesting',
+    href: '/backtesting',
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 3H15" />
+        <path d="M10 3V10.5L4.5 19.5C3.9 20.4 4.5 21.5 5.6 21.5H18.4C19.5 21.5 20.1 20.4 19.5 19.5L14 10.5V3" />
+      </svg>
+    ),
+  },
+  {
     label: 'Chat',
     href: '/chat',
     icon: (
