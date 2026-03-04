@@ -45,3 +45,7 @@ export type {
 // Pair executor
 export { PairExecutor } from './pair-executor.js';
 export type { PairExecutorConfig } from './pair-executor.js';
+
+// Flash executor
+export { FlashExecutor, FlashExecutorError } from './flash-executor.js';
+export type { FlashWalletClient } from './flash-executor.js';
