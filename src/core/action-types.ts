@@ -4,6 +4,7 @@ export const ACTION_TYPES = {
   SWAP: 'swap',
   BRIDGE: 'bridge',
   FUNDING_BRIDGE: 'funding_bridge',
+  WITHDRAWAL: 'withdrawal',
   COMPOSER: 'composer',
   REBALANCE: 'rebalance',
   PERP: 'perp',
@@ -105,6 +106,17 @@ export interface FundingBridgeAction extends BaseAction {
   readonly metadata: Record<string, unknown>;
 }
 
+export type WithdrawalReason = 'profit-taking' | 'rebalancing' | 'strategy-reallocation' | 'manual';
+
+export interface WithdrawalAction extends BaseAction {
+  readonly type: 'withdrawal';
+  readonly amount: bigint;
+  readonly targetChainId: ChainId;
+  readonly targetToken: TokenAddress;
+  readonly reason: WithdrawalReason;
+  readonly metadata: Record<string, unknown>;
+}
+
 export type ExecutorAction =
   | SwapAction
   | BridgeAction
@@ -113,4 +125,5 @@ export type ExecutorAction =
   | PerpAction
   | PairAction
   | MarketMakeAction
-  | FundingBridgeAction;
+  | FundingBridgeAction
+  | WithdrawalAction;

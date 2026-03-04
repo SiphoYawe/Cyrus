@@ -183,3 +183,16 @@ export class PerpOrderRejectedError extends CyrusError {
     );
   }
 }
+
+export class WithdrawalTimeoutError extends CyrusError {
+  constructor(context: {
+    withdrawalId: string;
+    elapsed: number;
+    amount: string;
+  }) {
+    super(
+      `Hyperliquid withdrawal timed out after ${context.elapsed}ms for amount ${context.amount}`,
+      context,
+    );
+  }
+}
