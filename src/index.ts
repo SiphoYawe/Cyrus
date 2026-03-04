@@ -1,3 +1,7 @@
+import { initSentry, captureError, Sentry } from './utils/sentry.js';
+
+initSentry();
+
 import { loadConfig } from './core/config.js';
 import { createLogger } from './utils/logger.js';
 import { Store } from './core/store.js';
@@ -73,6 +77,7 @@ async function main(): Promise<void> {
     await restServer.stop();
     persistence.close();
     logger.info('Cyrus agent shut down cleanly');
+    await Sentry.close(2000);
     process.exit(0);
   };
 
@@ -90,7 +95,9 @@ async function main(): Promise<void> {
   );
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   logger.fatal({ error }, 'Cyrus agent failed to start');
+  captureError(error, { phase: 'startup' });
+  await Sentry.close(2000);
   process.exit(1);
 });

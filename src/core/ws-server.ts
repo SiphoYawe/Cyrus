@@ -1,5 +1,6 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createLogger } from '../utils/logger.js';
+import { captureError } from '../utils/sentry.js';
 import type { Store, StoreEventName } from './store.js';
 import type { WsEventEnvelope, WsCommand } from './ws-types.js';
 import { WS_EVENT_TYPES, WS_COMMANDS, createEventEnvelope } from './ws-types.js';
@@ -273,6 +274,7 @@ export class AgentWebSocketServer {
         this.sendTo(ws, responseEnvelope);
       })
       .catch((err: Error) => {
+        captureError(err, { command: parsed.command });
         const errorEnvelope = createEventEnvelope(WS_EVENT_TYPES.COMMAND_ERROR, {
           command: parsed.command,
           error: err.message,

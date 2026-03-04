@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 import { createLogger } from '../utils/logger.js';
+import { captureError } from '../utils/sentry.js';
 import type { Store } from './store.js';
 import type { PersistenceService } from './persistence.js';
 import type { CyrusConfig } from './config.js';
@@ -74,6 +75,7 @@ export class AgentRestServer {
       await handler(req, res);
     } catch (err) {
       logger.error({ err, pathname, method: req.method }, 'Unhandled error in route handler');
+      captureError(err, { pathname, method: req.method });
       sendError(res, ERROR_CODES.INTERNAL_ERROR, 'Internal server error', 500);
     }
   }

@@ -1,4 +1,5 @@
 import { createLogger } from '../utils/logger.js';
+import { captureError } from '../utils/sentry.js';
 import { sleep } from '../utils/sleep.js';
 import type pino from 'pino';
 
@@ -29,6 +30,11 @@ export abstract class RunnableBase {
           { error, consecutiveErrors: this.consecutiveErrors, tickCount: this.tickCount },
           'Error in control task'
         );
+        captureError(error, {
+          component: 'ooda-loop',
+          tickCount: this.tickCount,
+          consecutiveErrors: this.consecutiveErrors,
+        });
 
         if (this.consecutiveErrors >= 10) {
           this.logger.fatal(
