@@ -107,8 +107,8 @@ function loadEnvConfig(): Record<string, unknown> {
   if (process.env.CYRUS_WS_PORT) {
     env.ws = { port: parseInt(process.env.CYRUS_WS_PORT, 10) };
   }
-  if (process.env.CYRUS_REST_PORT) {
-    env.rest = { port: parseInt(process.env.CYRUS_REST_PORT, 10) };
+  if (process.env.CYRUS_REST_PORT || process.env.PORT) {
+    env.rest = { port: parseInt(process.env.CYRUS_REST_PORT || process.env.PORT!, 10) };
   }
 
   return env;
