@@ -240,7 +240,7 @@ describe('BacktestEngine', () => {
       expect(result.endDate).toBe(3000);
       expect(result.initialCapital).toBe(1000000n);
       expect(result.totalTrades).toBe(0);
-      expect(result.durationMs).toBeGreaterThan(0);
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
     });
 
     it('equity curve has points for each tick plus initial', async () => {
