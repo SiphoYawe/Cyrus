@@ -196,3 +196,32 @@ export class WithdrawalTimeoutError extends CyrusError {
     );
   }
 }
+
+export class PairTradeRollbackError extends CyrusError {
+  constructor(context: {
+    pair: string;
+    longSymbol: string;
+    shortSymbol: string;
+    filledLegOrderId: string;
+    rejectionReason: string;
+    rollbackSuccess: boolean;
+  }) {
+    super(
+      `Pair trade rollback for ${context.pair}: second leg rejected (${context.rejectionReason}), first leg ${context.rollbackSuccess ? 'closed' : 'FAILED TO CLOSE'}`,
+      context,
+    );
+  }
+}
+
+export class MaxPairPositionsError extends CyrusError {
+  constructor(context: {
+    currentCount: number;
+    maxCount: number;
+    pair: string;
+  }) {
+    super(
+      `Max pair positions (${context.maxCount}) reached, cannot open ${context.pair}`,
+      context,
+    );
+  }
+}

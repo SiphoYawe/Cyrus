@@ -49,3 +49,7 @@ export type { PairExecutorConfig } from './pair-executor.js';
 // Flash executor
 export { FlashExecutor, FlashExecutorError } from './flash-executor.js';
 export type { FlashWalletClient } from './flash-executor.js';
+
+// Stat arb pair executor
+export { StatArbPairExecutor } from './stat-arb-pair-executor.js';
+export type { StatArbPairExecutorConfig } from './stat-arb-pair-executor.js';

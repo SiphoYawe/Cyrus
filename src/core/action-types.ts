@@ -10,6 +10,7 @@ export const ACTION_TYPES = {
   PERP: 'perp',
   PAIR: 'pair',
   MARKET_MAKE: 'market_make',
+  STAT_ARB_PAIR: 'stat_arb_pair',
 } as const;
 
 export type ActionType = (typeof ACTION_TYPES)[keyof typeof ACTION_TYPES];
@@ -117,6 +118,24 @@ export interface WithdrawalAction extends BaseAction {
   readonly metadata: Record<string, unknown>;
 }
 
+export interface StatArbPairAction extends BaseAction {
+  readonly type: 'stat_arb_pair';
+  readonly pair: {
+    readonly tokenA: string;
+    readonly tokenB: string;
+    readonly key: string;
+  };
+  readonly direction: 'long_pair' | 'short_pair';
+  readonly hedgeRatio: number;
+  readonly entryZScore: number;
+  readonly halfLifeHours: number;
+  readonly leverage: number;
+  readonly capitalAllocation: number;
+  readonly correlation: number;
+  readonly signalSource: 'native' | 'telegram' | 'external';
+  readonly metadata: Record<string, unknown>;
+}
+
 export type ExecutorAction =
   | SwapAction
   | BridgeAction
@@ -126,4 +145,5 @@ export type ExecutorAction =
   | PairAction
   | MarketMakeAction
   | FundingBridgeAction
-  | WithdrawalAction;
+  | WithdrawalAction
+  | StatArbPairAction;
