@@ -152,3 +152,34 @@ export class StrategyConfigError extends CyrusError {
     this.value = context.value;
   }
 }
+
+export class LeverageSelectionError extends CyrusError {
+  constructor(context: {
+    correlation: number;
+    absZScore: number;
+    spreadVolatility: number;
+    minCorrelation: number;
+    minAbsZScore: number;
+  }) {
+    super(
+      `Signal does not meet minimum leverage thresholds: correlation ${context.correlation} (min ${context.minCorrelation}), |Z| ${context.absZScore} (min ${context.minAbsZScore})`,
+      context,
+    );
+  }
+}
+
+export class PerpOrderRejectedError extends CyrusError {
+  constructor(context: {
+    symbol: string;
+    side: string;
+    size: string;
+    leverage: number;
+    rejectionReason: string;
+    originalResponse?: unknown;
+  }) {
+    super(
+      `Perp order rejected for ${context.symbol} ${context.side}: ${context.rejectionReason}`,
+      { ...context, originalResponse: String(context.originalResponse ?? '') },
+    );
+  }
+}
