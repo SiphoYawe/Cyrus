@@ -81,3 +81,31 @@ export type {
   PearMargin,
   PearOrderResult,
 } from './pear-protocol-connector.js';
+
+// Solana types
+export type {
+  SolanaBalance,
+  SolanaTransaction,
+  SolanaCommitment,
+  SolanaConnectorConfig,
+  JupiterQuote,
+  JupiterRoutePlan,
+  JupiterSwapResult,
+  SolanaBridgeParams,
+} from './solana-types.js';
+export {
+  SOLANA_CHAIN_ID,
+  WRAPPED_SOL_MINT,
+  SOLANA_NATIVE_MINT,
+  SOLANA_DEFAULTS,
+} from './solana-types.js';
+
+// Solana connector
+export { SolanaConnector, SolanaConnectorError, SolanaConfirmationTimeoutError } from './solana-connector.js';
+
+// Jupiter client
+export { JupiterClient, JupiterClientError } from './jupiter-client.js';
+
+// Wallet manager
+export { WalletManager, WalletManagerError } from './wallet-manager.js';
+export type { WalletManagerConfig } from './wallet-manager.js';
