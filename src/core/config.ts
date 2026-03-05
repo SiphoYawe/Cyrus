@@ -110,6 +110,24 @@ function loadEnvConfig(): Record<string, unknown> {
   if (process.env.CYRUS_REST_PORT || process.env.PORT) {
     env.rest = { port: parseInt(process.env.CYRUS_REST_PORT || process.env.PORT!, 10) };
   }
+  if (process.env.CYRUS_CORS_ORIGIN) {
+    env.rest = { ...(env.rest as Record<string, unknown> ?? {}), corsOrigin: process.env.CYRUS_CORS_ORIGIN };
+  }
+  if (process.env.CYRUS_STRATEGIES_ENABLED) {
+    env.strategies = { enabled: process.env.CYRUS_STRATEGIES_ENABLED.split(',').map((s) => s.trim()) };
+  }
+  if (process.env.CYRUS_CHAINS_ENABLED) {
+    env.chains = { ...(env.chains as Record<string, unknown> ?? {}), enabled: process.env.CYRUS_CHAINS_ENABLED.split(',').map((s) => parseInt(s.trim(), 10)) };
+  }
+  if (process.env.CYRUS_RPC_URLS) {
+    // Format: "chainId=url,chainId=url"
+    const rpcUrls: Record<string, string> = {};
+    for (const pair of process.env.CYRUS_RPC_URLS.split(',')) {
+      const [id, url] = pair.split('=', 2);
+      if (id && url) rpcUrls[id.trim()] = url.trim();
+    }
+    env.chains = { ...(env.chains as Record<string, unknown> ?? {}), rpcUrls };
+  }
 
   return env;
 }
