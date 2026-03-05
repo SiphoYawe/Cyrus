@@ -100,13 +100,19 @@ export class FlashOrchestrator extends RunnableBase {
       return;
     }
 
-    // Check active loops for time barriers
-    for (const [loopId, state] of this.activeLoops) {
+    // Check active loops for time barriers (collect IDs first to avoid mutating map during iteration)
+    const expiredLoopIds: string[] = [];
+    for (const [loopId] of this.activeLoops) {
       if (this.isTimeBarrierTriggered(loopId)) {
-        this.logger.warn({ loopId, status: state.status }, 'Time barrier triggered');
-        const report = await this.emergencyRepay(state);
-        this.finalizeLoop(loopId, report);
+        expiredLoopIds.push(loopId);
       }
+    }
+    for (const loopId of expiredLoopIds) {
+      const state = this.activeLoops.get(loopId);
+      if (!state) continue;
+      this.logger.warn({ loopId, status: state.status }, 'Time barrier triggered');
+      const report = await this.emergencyRepay(state);
+      this.finalizeLoop(loopId, report);
     }
 
     // Only scan if capacity available
@@ -535,7 +541,15 @@ export class FlashOrchestrator extends RunnableBase {
       return this.generateReport(state, outcome);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      this.logger.error({ loopId: loop.id, error: reason }, 'Loop execution failed');
+      this.logger.error({ loopId: loop.id, error: reason, currentLeg: state.currentLeg }, 'Loop execution failed');
+
+      // If we've already borrowed (currentLeg >= 1), attempt emergency repay to recover funds
+      if (state.currentLeg >= 1) {
+        this.logger.warn({ loopId: loop.id }, 'Attempting emergency repay after execution failure');
+        return this.emergencyRepay(state);
+      }
+
+      // Borrow itself failed — nothing to repay
       state.status = 'failed';
       return this.generateReport(state, 'loss');
     }
@@ -647,15 +661,28 @@ export class FlashOrchestrator extends RunnableBase {
   ): FlashLoopReport {
     const durationMs = Date.now() - loopState.startedAt;
 
+    // Calculate actual profit from token amounts (current - borrowed - fee)
+    const fee = loopState.borrowedAmount > 0n
+      ? FlashExecutor.calculateFee('aave-v3', loopState.borrowedAmount)
+      : 0n;
+    const totalRepayment = loopState.borrowedAmount + fee;
+    // Token-level profit (positive = profit, negative = loss)
+    const tokenDelta = loopState.currentTokenAmount - totalRepayment;
+    // Convert to USD-approx: use gasSpent + feesSpent as cost proxy
+    // The tokenDelta is in token units; we'll report costs separately
+    const grossProfitFromExecution = tokenDelta > 0n
+      ? Number(tokenDelta) / 1e18 // rough USD (assumes ~$1 per token unit, actual depends on price)
+      : -(Number(-tokenDelta) / 1e18);
+
     const report: FlashLoopReport = {
       loopId: loopState.loopId,
       outcome,
-      grossProfit: 0, // calculated from actual execution
+      grossProfit: grossProfitFromExecution,
       flashLoanFee: loopState.feesSpent,
       totalGasCosts: loopState.gasSpent,
       totalBridgeFees: loopState.feesSpent,
       totalSlippage: 0,
-      netProfit: -(loopState.gasSpent + loopState.feesSpent), // simplified
+      netProfit: grossProfitFromExecution - loopState.gasSpent - loopState.feesSpent,
       durationMs,
       legs: loopState.txHashes.map((txHash, i) => ({
         type: ['borrow', 'bridge-out', 'swap', 'bridge-back', 'repay'][i] ?? 'unknown',

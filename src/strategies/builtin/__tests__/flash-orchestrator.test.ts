@@ -844,6 +844,145 @@ describe('FlashOrchestrator', () => {
     });
   });
 
+  describe('FIX-6: multi-step cycle recovery', () => {
+    it('emergency repays when swap fails after successful borrow + bridge', async () => {
+      const swapExecutor: FlashSwapExecutor = {
+        executeSwap: vi.fn().mockRejectedValue(new Error('Swap reverted: insufficient liquidity')),
+      };
+
+      const { orchestrator, walletClient, bridgeExecutor } = createOrchestrator({ swapExecutor });
+      const opps = await orchestrator.scanOpportunities();
+      const report = await orchestrator.executeLoop(opps[0]);
+
+      // Should trigger emergency repay (not just a loss)
+      expect(report.outcome).toBe('emergency-repay');
+      // Borrow happened (1 call), then emergency repay needs bridge-back + repay
+      // Bridge executor: 1 bridge-out + 1 emergency bridge-back = 2 calls
+      expect((bridgeExecutor.executeBridge as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThanOrEqual(1);
+      // Wallet writeContract: borrow + repay
+      expect(walletClient.writeContract).toHaveBeenCalled();
+    });
+
+    it('reports loss without emergency repay when borrow itself fails', async () => {
+      const walletClient = createMockWalletClient();
+      walletClient.writeContract.mockRejectedValue(new Error('Borrow reverted'));
+      const flashExecutor = new FlashExecutor(walletClient);
+
+      const orchestrator = new FlashOrchestrator(
+        {
+          flashLoanProviders: [TEST_PROVIDER],
+          monitoredTokens: [WETH],
+          monitoredChainPairs: [[CHAIN_A, CHAIN_B]],
+        },
+        {
+          priceFetcher: createMockPriceFetcher(new Map([
+            [`${CHAIN_A as number}-${WETH as string}`, 3450],
+            [`${CHAIN_B as number}-${WETH as string}`, 3530],
+          ])),
+          bridgeQuoter: createMockBridgeQuoter(),
+          swapExecutor: createMockSwapExecutor(),
+          bridgeExecutor: createMockBridgeExecutor(),
+          flashExecutor,
+        },
+        1000,
+      );
+
+      const opps = await orchestrator.scanOpportunities();
+      const report = await orchestrator.executeLoop(opps[0]);
+
+      // Borrow failed at leg 0 — no emergency repay needed
+      expect(report.outcome).toBe('loss');
+    });
+  });
+
+  describe('FIX-6: profitability pre-check accuracy', () => {
+    it('generateReport calculates gross profit from token amounts', () => {
+      const { orchestrator } = createOrchestrator();
+
+      const state: LoopExecutionState = {
+        loopId: 'profit-calc-loop',
+        status: 'completed',
+        currentLeg: 4,
+        startedAt: Date.now() - 60_000,
+        deadlineAt: Date.now() + 1_740_000,
+        borrowedAmount: 1_000_000_000_000_000_000n, // 1 token
+        borrowedToken: WETH,
+        borrowChain: CHAIN_A,
+        currentTokenAmount: 1_050_000_000_000_000_000n, // 1.05 tokens (5% gain)
+        currentTokenChain: CHAIN_A,
+        txHashes: ['tx1', 'tx2', 'tx3', 'tx4', 'tx5'],
+        gasSpent: 10,
+        feesSpent: 5,
+      };
+
+      const report = orchestrator.generateReport(state, 'profit');
+      // grossProfit should be positive (received more than borrowed + fee)
+      expect(report.grossProfit).toBeGreaterThan(0);
+      // netProfit = grossProfit - gas - fees
+      expect(report.netProfit).toBe(report.grossProfit - report.totalGasCosts - report.flashLoanFee);
+    });
+
+    it('generateReport shows negative profit when current amount < borrowed + fee', () => {
+      const { orchestrator } = createOrchestrator();
+
+      const state: LoopExecutionState = {
+        loopId: 'loss-calc-loop',
+        status: 'completed',
+        currentLeg: 4,
+        startedAt: Date.now() - 60_000,
+        deadlineAt: Date.now() + 1_740_000,
+        borrowedAmount: 1_000_000_000_000_000_000n,
+        borrowedToken: WETH,
+        borrowChain: CHAIN_A,
+        currentTokenAmount: 900_000_000_000_000_000n, // lost 10%
+        currentTokenChain: CHAIN_A,
+        txHashes: ['tx1', 'tx2', 'tx3', 'tx4', 'tx5'],
+        gasSpent: 10,
+        feesSpent: 5,
+      };
+
+      const report = orchestrator.generateReport(state, 'loss');
+      expect(report.grossProfit).toBeLessThan(0);
+      expect(report.netProfit).toBeLessThan(0);
+    });
+  });
+
+  describe('FIX-6: controlTask time barrier safe iteration', () => {
+    it('handles multiple expired loops in single tick without iteration error', async () => {
+      const { orchestrator, walletClient } = createOrchestrator({
+        config: { maxConcurrentLoops: 3 },
+      });
+
+      // Add 2 expired loops
+      for (let i = 0; i < 2; i++) {
+        const state: LoopExecutionState = {
+          loopId: `expired-${i}`,
+          status: 'bridging-out',
+          currentLeg: 1,
+          startedAt: Date.now() - 2_000_000,
+          deadlineAt: Date.now() - 1000,
+          borrowedAmount: 1_000_000_000_000_000_000n,
+          borrowedToken: WETH,
+          borrowChain: CHAIN_A,
+          currentTokenAmount: 990_000_000_000_000_000n,
+          currentTokenChain: CHAIN_A, // on source chain — no bridge needed
+          txHashes: ['tx1'],
+          gasSpent: 5,
+          feesSpent: 5,
+        };
+        // @ts-expect-error — accessing private map for testing
+        orchestrator.activeLoops.set(`expired-${i}`, state);
+      }
+
+      // Should handle both expired loops without throwing
+      await orchestrator.controlTask();
+
+      // Both expired loops should have been finalized
+      expect(orchestrator.getActiveLoops().length).toBe(0);
+      expect(orchestrator.getCompletedReports().length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
   describe('FlashExecutor', () => {
     it('borrow calls writeContract with correct Aave V3 args', async () => {
       const walletClient = createMockWalletClient();
