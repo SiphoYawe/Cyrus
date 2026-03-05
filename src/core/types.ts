@@ -206,6 +206,7 @@ export interface StrategyContext {
   readonly prices: Map<string, number>; // key: `${chainId}-${tokenAddress}`, value: USD price
   readonly activeTransfers: readonly InFlightTransfer[];
   readonly microstructure?: import('../data/market-data-types.js').MarketMicrostructure;
+  readonly onChainData?: readonly import('../data/on-chain-types.js').ConcreteOnChainEvent[];
 }
 
 // Risk parameters — declarative risk config per strategy

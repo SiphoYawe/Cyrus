@@ -55,6 +55,8 @@ import { SignalGenerator } from './stat-arb/signal-generator.js';
 import { StrategyLoader } from './strategies/strategy-loader.js';
 import { StrategyRunner } from './core/strategy-runner.js';
 import type { CrossChainStrategy } from './strategies/cross-chain-strategy.js';
+import { YieldHunter } from './strategies/builtin/yield-hunter.js';
+import { LiquidStakingStrategy } from './strategies/builtin/liquid-staking.js';
 
 // Types
 import type { RunnableBase } from './core/runnable-base.js';
@@ -245,9 +247,17 @@ async function main(): Promise<void> {
     ));
 
     // 7f. Data pipelines
+    const indexerInstance = new OnChainIndexer();
+    onChainIndexer = indexerInstance;
+    indexerInstance.start().catch((err) =>
+      logger.error({ error: err }, 'On-chain indexer crashed')
+    );
+    logger.info('On-chain indexer started');
+
     const marketDataService = new MarketDataService({
       mode: config.mode,
       connector: lifiConnector,
+      onChainIndexer: indexerInstance,
     });
     await marketDataService.initialize();
     logger.info('Market data service initialized');
@@ -258,13 +268,6 @@ async function main(): Promise<void> {
       logger.error({ error: err }, 'Chain scout crashed')
     );
     logger.info('Chain scout started');
-
-    const indexerInstance = new OnChainIndexer();
-    onChainIndexer = indexerInstance;
-    indexerInstance.start().catch((err) =>
-      logger.error({ error: err }, 'On-chain indexer crashed')
-    );
-    logger.info('On-chain indexer started');
 
     const sentinelInstance = new SocialSentinel();
     socialSentinel = sentinelInstance;
@@ -295,6 +298,26 @@ async function main(): Promise<void> {
       } catch (error) {
         logger.error({ strategy: name, error }, 'Failed to load strategy, skipping');
       }
+    }
+
+    // 7h-b. Yield data auto-population — initial load for yield-dependent strategies
+    try {
+      const [yieldOpportunities, stakingRates] = await Promise.all([
+        marketDataService.fetchYieldOpportunities(),
+        marketDataService.fetchStakingRates(),
+      ]);
+      for (const strategy of strategies) {
+        if (strategy instanceof YieldHunter) {
+          strategy.setYieldData(yieldOpportunities);
+          logger.info({ count: yieldOpportunities.length }, 'Yield data injected into YieldHunter');
+        }
+        if (strategy instanceof LiquidStakingStrategy) {
+          strategy.setStakingRates(stakingRates);
+          logger.info({ count: stakingRates.length }, 'Staking rates injected into LiquidStakingStrategy');
+        }
+      }
+    } catch (err) {
+      logger.warn({ error: err }, 'Initial yield data population failed (non-fatal)');
     }
 
     // 7i. Strategy runner

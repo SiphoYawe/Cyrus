@@ -2,6 +2,10 @@ import { RunnableBase } from './runnable-base.js';
 import type { ActionQueue } from './action-queue.js';
 import type { CrossChainStrategy } from '../strategies/cross-chain-strategy.js';
 import type { MarketDataService } from '../data/market-data-service.js';
+import { YieldHunter } from '../strategies/builtin/yield-hunter.js';
+import { LiquidStakingStrategy } from '../strategies/builtin/liquid-staking.js';
+
+const YIELD_REFRESH_INTERVAL_MS = 5 * 60_000; // 5 minutes
 
 export interface StrategyRunnerDeps {
   readonly strategies: CrossChainStrategy[];
@@ -16,6 +20,7 @@ export class StrategyRunner extends RunnableBase {
   private readonly actionQueue: ActionQueue;
   private actionsEnqueued = 0;
   private strategiesEvaluated = 0;
+  private lastYieldRefresh = 0;
 
   constructor(deps: StrategyRunnerDeps) {
     super(deps.tickIntervalMs, 'strategy-runner');
@@ -29,6 +34,9 @@ export class StrategyRunner extends RunnableBase {
       this.logger.debug('Market data service not ready, skipping tick');
       return;
     }
+
+    // Periodic yield data refresh for yield-dependent strategies
+    await this.refreshYieldDataIfNeeded();
 
     const context = await this.marketDataService.buildContext();
 
@@ -74,6 +82,37 @@ export class StrategyRunner extends RunnableBase {
           'Strategy evaluation failed, continuing with next'
         );
       }
+    }
+  }
+
+  private async refreshYieldDataIfNeeded(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastYieldRefresh < YIELD_REFRESH_INTERVAL_MS) return;
+
+    const hasYieldStrategies = this.strategies.some(
+      (s) => s instanceof YieldHunter || s instanceof LiquidStakingStrategy,
+    );
+    if (!hasYieldStrategies) return;
+
+    try {
+      const [yields, stakingRates] = await Promise.all([
+        this.marketDataService.fetchYieldOpportunities(),
+        this.marketDataService.fetchStakingRates(),
+      ]);
+
+      for (const strategy of this.strategies) {
+        if (strategy instanceof YieldHunter) {
+          strategy.setYieldData(yields);
+        }
+        if (strategy instanceof LiquidStakingStrategy) {
+          strategy.setStakingRates(stakingRates);
+        }
+      }
+
+      this.lastYieldRefresh = now;
+      this.logger.debug({ yields: yields.length, stakingRates: stakingRates.length }, 'Yield data refreshed');
+    } catch (err) {
+      this.logger.warn({ error: err }, 'Yield data refresh failed (non-fatal)');
     }
   }
 

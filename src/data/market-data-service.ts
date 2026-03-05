@@ -15,12 +15,50 @@ import type {
   MarketMicrostructure,
   PriceCandle,
 } from './market-data-types.js';
+import type { OnChainIndexer } from './on-chain-indexer.js';
+import type { ConcreteOnChainEvent } from './on-chain-types.js';
+import type { YieldOpportunity } from '../strategies/builtin/yield-hunter.js';
+import type { StakingRate } from '../strategies/builtin/liquid-staking.js';
 
 const logger = createLogger('market-data');
 
 function cacheKey(chainId: ChainId, tokenAddress: TokenAddress): string {
   return `${chainId}-${tokenAddress}`;
 }
+
+// Static CoinGecko token address → CoinGecko ID lookup
+const TOKEN_TO_COINGECKO_ID: Record<string, string> = {
+  '0x0000000000000000000000000000000000000000': 'ethereum', // Native ETH
+  '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 'ethereum', // WETH
+  '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': 'usd-coin', // USDC (Ethereum)
+  '0xdac17f958d2ee523a2206206994597c13d831ec7': 'tether', // USDT (Ethereum)
+  '0x6b175474e89094c44da98b954eedeac495271d0f': 'dai', // DAI
+  '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599': 'wrapped-bitcoin', // WBTC
+  '0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0': 'wrapped-steth', // wstETH
+  '0xae78736cd615f374d3085123a210448e74fc6393': 'rocket-pool-eth', // rETH
+  '0x514910771af9ca656af840dff83e8264ecf986ca': 'chainlink', // LINK
+  '0x1f9840a85d5af5bf1d1762f925bdaddc4201f984': 'uniswap', // UNI
+  '0xd533a949740bb3306d119cc777fa900ba034cd52': 'curve-dao-token', // CRV
+  '0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9': 'aave', // AAVE
+  '0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2': 'maker', // MKR
+  '0x35a18000230da775cac24873d00ff85bccded550': 'ethereum', // Aave aWETH (map to ETH price)
+  '0xaf88d065e77c8cc2239327c5edb3a432268e5831': 'usd-coin', // USDC (Arbitrum)
+  '0xff970a61a04b1ca14834a43f5de4533ebddb5cc8': 'usd-coin', // USDC.e (Arbitrum)
+  '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9': 'tether', // USDT (Arbitrum)
+  '0x82af49447d8a07e3bd95bd0d56f35241523fbab1': 'ethereum', // WETH (Arbitrum)
+};
+
+// DeFiLlama protocol name → supported protocol flag
+const DEFI_LLAMA_YIELD_PROTOCOLS = new Set([
+  'aave-v3', 'morpho', 'euler', 'maple-finance', 'lido', 'rocket-pool',
+  'ether.fi', 'ethena', 'pendle', 'compound-v3',
+]);
+
+// DeFiLlama chain slug → chain ID
+const DEFI_LLAMA_CHAIN_TO_ID: Record<string, number> = {
+  ethereum: 1, arbitrum: 42161, optimism: 10, polygon: 137,
+  base: 8453, bsc: 56,
+};
 
 export interface BalanceSource {
   getAllBalances(): Array<{ chainId: ChainId; tokenAddress: TokenAddress; amount: bigint }>;
@@ -31,6 +69,8 @@ export interface MarketDataServiceOptions {
   readonly connector: LiFiConnectorInterface;
   readonly balanceSource?: BalanceSource;
   readonly priceCacheTtlMs?: number;
+  readonly onChainIndexer?: OnChainIndexer;
+  readonly fetchFn?: typeof globalThis.fetch;
 }
 
 export class MarketDataService {
@@ -51,12 +91,27 @@ export class MarketDataService {
   private readonly oiCache = new TtlCache<OpenInterestData>(30_000); // 30s
   private readonly correlationCache = new TtlCache<CorrelationResult>(300_000); // 5min
 
+  // CoinGecko + DeFiLlama caches
+  private readonly coinGeckoCache = new TtlCache<Map<string, number>>(30_000); // 30s
+  private readonly yieldCache = new TtlCache<YieldOpportunity[]>(300_000); // 5min
+  private readonly stakingRateCache = new TtlCache<StakingRate[]>(300_000); // 5min
+
+  // OnChainIndexer integration
+  private readonly onChainIndexer: OnChainIndexer | null;
+  private readonly onChainEvents: ConcreteOnChainEvent[] = [];
+  private static readonly MAX_ON_CHAIN_EVENTS = 100;
+
+  // Custom fetch for testability
+  private readonly fetchFn: typeof globalThis.fetch;
+
   constructor(options: MarketDataServiceOptions) {
     this.mode = options.mode;
     this.connector = options.connector;
     this.priceCache = new PriceCache(options.priceCacheTtlMs);
     this.balanceSource = options.balanceSource ?? null;
     this.store = Store.getInstance();
+    this.onChainIndexer = options.onChainIndexer ?? null;
+    this.fetchFn = options.fetchFn ?? globalThis.fetch.bind(globalThis);
   }
 
   get ready(): boolean {
@@ -73,6 +128,18 @@ export class MarketDataService {
       if (this.mode === 'live' || this.mode === 'dry-run') {
         await this.connector.getChains();
       }
+
+      // Subscribe to OnChainIndexer events (rolling window)
+      if (this.onChainIndexer) {
+        this.onChainIndexer.events.on('on_chain_event', (event: ConcreteOnChainEvent) => {
+          this.onChainEvents.push(event);
+          while (this.onChainEvents.length > MarketDataService.MAX_ON_CHAIN_EVENTS) {
+            this.onChainEvents.shift();
+          }
+        });
+        logger.info('Subscribed to OnChainIndexer events');
+      }
+
       this._ready = true;
       logger.info({ mode: this.mode, durationMs: Date.now() - start }, 'Market data service ready');
     } finally {
@@ -89,6 +156,15 @@ export class MarketDataService {
     const cached = this.priceCache.get(key);
     if (cached !== null) return cached;
 
+    // Try CoinGecko first (primary source)
+    const cgPrice = await this.fetchCoinGeckoPrice(tokenAddress);
+    if (cgPrice > 0) {
+      this.priceCache.set(key, cgPrice);
+      this.store.setPrice(chainId, tokenAddress, cgPrice);
+      return cgPrice;
+    }
+
+    // Fallback to LI.FI token endpoint
     const tokens = await this.connector.getTokens(chainId as number);
     const normalizedAddr = (tokenAddress as string).toLowerCase();
     const token = tokens.find((t) => t.address.toLowerCase() === normalizedAddr);
@@ -194,6 +270,7 @@ export class MarketDataService {
       prices,
       activeTransfers,
       microstructure,
+      onChainData: Object.freeze([...this.onChainEvents]),
     };
 
     return Object.freeze(ctx);
@@ -647,6 +724,164 @@ export class MarketDataService {
     return { orderBooks, volumes, volatilities, fundingRates, openInterest, correlations };
   }
 
+  // --- CoinGecko price feed ---
+
+  private async fetchCoinGeckoPrice(tokenAddress: TokenAddress): Promise<number> {
+    const addr = (tokenAddress as string).toLowerCase();
+    const geckoId = TOKEN_TO_COINGECKO_ID[addr];
+    if (!geckoId) return 0;
+
+    try {
+      const prices = await this.fetchCoinGeckoPrices([geckoId]);
+      return prices.get(geckoId) ?? 0;
+    } catch (err) {
+      logger.debug({ token: addr, error: (err as Error).message }, 'CoinGecko price fetch failed');
+      return 0;
+    }
+  }
+
+  async fetchCoinGeckoPrices(tokenIds: string[]): Promise<Map<string, number>> {
+    if (tokenIds.length === 0) return new Map();
+
+    // Dedup
+    const unique = [...new Set(tokenIds)];
+    const batchKey = `cg-${unique.sort().join(',')}`;
+    const cached = this.coinGeckoCache.get(batchKey);
+    if (cached) return cached;
+
+    const idsParam = unique.join(',');
+    const url = `https://api.coingecko.com/api/v3/simple/price?ids=${idsParam}&vs_currencies=usd`;
+
+    const response = await this.fetchFn(url);
+    if (!response.ok) {
+      logger.warn({ status: response.status }, 'CoinGecko API error');
+      return new Map();
+    }
+
+    const data = (await response.json()) as Record<string, { usd?: number }>;
+    const result = new Map<string, number>();
+    for (const [id, info] of Object.entries(data)) {
+      if (info.usd !== undefined) {
+        result.set(id, info.usd);
+      }
+    }
+
+    this.coinGeckoCache.set(batchKey, result);
+    return result;
+  }
+
+  // --- DeFiLlama yield data ---
+
+  async fetchYieldOpportunities(): Promise<YieldOpportunity[]> {
+    const cached = this.yieldCache.get('yields');
+    if (cached) return cached;
+
+    try {
+      const response = await this.fetchFn('https://yields.llama.fi/pools');
+      if (!response.ok) {
+        logger.warn({ status: response.status }, 'DeFiLlama yields API error');
+        return [];
+      }
+
+      const data = (await response.json()) as {
+        data: Array<{
+          pool: string;
+          chain: string;
+          project: string;
+          symbol: string;
+          tvlUsd: number;
+          apy: number;
+          underlyingTokens?: string[];
+        }>;
+      };
+
+      const opportunities: YieldOpportunity[] = [];
+      for (const pool of data.data) {
+        if (!DEFI_LLAMA_YIELD_PROTOCOLS.has(pool.project)) continue;
+
+        const chainIdNum = DEFI_LLAMA_CHAIN_TO_ID[pool.chain.toLowerCase()];
+        if (!chainIdNum) continue;
+        if (!pool.apy || pool.apy <= 0) continue;
+
+        const tokenAddr = pool.underlyingTokens?.[0]?.toLowerCase() ?? pool.pool;
+
+        opportunities.push({
+          protocol: pool.project,
+          chainId: chainIdNum as ChainId,
+          token: tokenAddr as TokenAddress,
+          apy: pool.apy,
+          tvl: pool.tvlUsd ?? 0,
+          riskScore: pool.tvlUsd > 100_000_000 ? 0.1 : pool.tvlUsd > 10_000_000 ? 0.3 : 0.6,
+        });
+      }
+
+      this.yieldCache.set('yields', opportunities);
+      logger.info({ count: opportunities.length }, 'DeFiLlama yields fetched');
+      return opportunities;
+    } catch (err) {
+      logger.warn({ error: (err as Error).message }, 'DeFiLlama yields fetch failed');
+      return [];
+    }
+  }
+
+  async fetchStakingRates(): Promise<StakingRate[]> {
+    const cached = this.stakingRateCache.get('staking');
+    if (cached) return cached;
+
+    try {
+      const response = await this.fetchFn('https://yields.llama.fi/pools');
+      if (!response.ok) return [];
+
+      const data = (await response.json()) as {
+        data: Array<{
+          pool: string;
+          chain: string;
+          project: string;
+          symbol: string;
+          tvlUsd: number;
+          apy: number;
+          underlyingTokens?: string[];
+        }>;
+      };
+
+      const stakingProjects = new Set(['lido', 'ether.fi', 'ethena', 'rocket-pool']);
+      const rates: StakingRate[] = [];
+
+      for (const pool of data.data) {
+        if (!stakingProjects.has(pool.project)) continue;
+
+        const chainIdNum = DEFI_LLAMA_CHAIN_TO_ID[pool.chain.toLowerCase()];
+        if (!chainIdNum) continue;
+        if (!pool.apy || pool.apy <= 0) continue;
+
+        const tokenAddr = pool.underlyingTokens?.[0]?.toLowerCase() ?? pool.pool;
+
+        rates.push({
+          protocol: pool.project,
+          chainId: chainIdNum as ChainId,
+          receiptToken: tokenAddr as TokenAddress,
+          apy: pool.apy,
+          tvl: pool.tvlUsd ?? 0,
+          underlyingToken: tokenAddr as TokenAddress,
+          exchangeRate: 1.0,
+        });
+      }
+
+      this.stakingRateCache.set('staking', rates);
+      logger.info({ count: rates.length }, 'DeFiLlama staking rates fetched');
+      return rates;
+    } catch (err) {
+      logger.warn({ error: (err as Error).message }, 'DeFiLlama staking rates fetch failed');
+      return [];
+    }
+  }
+
+  // --- OnChainIndexer data access ---
+
+  getOnChainEvents(): readonly ConcreteOnChainEvent[] {
+    return this.onChainEvents;
+  }
+
   invalidateAllEnhanced(): void {
     this.orderBookCache.clear();
     this.volumeCache.clear();
@@ -707,5 +942,8 @@ export class MarketDataService {
   resetCache(): void {
     this.priceCache.clear();
     this.invalidateAllEnhanced();
+    this.coinGeckoCache.clear();
+    this.yieldCache.clear();
+    this.stakingRateCache.clear();
   }
 }
