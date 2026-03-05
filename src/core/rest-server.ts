@@ -11,6 +11,7 @@ import { createPortfolioHandler } from './rest-handlers/portfolio-handler.js';
 import { createActivityHandler } from './rest-handlers/activity-handler.js';
 import { createStrategiesHandler } from './rest-handlers/strategies-handler.js';
 import { createConfigHandler } from './rest-handlers/config-handler.js';
+import { createAnalyticsHandler } from './rest-handlers/analytics-handler.js';
 
 const logger = createLogger('rest-server');
 
@@ -42,6 +43,7 @@ export class AgentRestServer {
     this.routes.set('/api/activity', createActivityHandler(deps.persistence));
     this.routes.set('/api/strategies', createStrategiesHandler(deps.store, deps.config));
     this.routes.set('/api/config', createConfigHandler(deps.config));
+    this.routes.set('/api/analytics', createAnalyticsHandler(deps.store));
 
     this.server = createServer((req, res) => {
       void this.handleRequest(req, res);
