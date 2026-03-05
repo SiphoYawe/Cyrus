@@ -12,7 +12,55 @@ import { CyrusAgent } from './core/cyrus-agent.js';
 import { AgentRestServer } from './core/rest-server.js';
 import { AgentWebSocketServer } from './core/ws-server.js';
 
+// Wallet
+import { createWalletSetup } from './utils/wallet.js';
+
+// Connectors
+import { LiFiConnector } from './connectors/lifi-connector.js';
+import { HyperliquidConnector } from './connectors/hyperliquid-connector.js';
+import { PearProtocolConnector } from './connectors/pear-protocol-connector.js';
+
+// Utility executors
+import { ApprovalHandler } from './executors/approval-handler.js';
+import { TransactionExecutor } from './executors/transaction-executor.js';
+import { PreFlightChecker } from './executors/pre-flight-checks.js';
+
+// Trading executors
+import { SwapExecutor } from './executors/swap-executor.js';
+import { BridgeExecutor } from './executors/bridge-executor.js';
+import { ComposerExecutor } from './executors/composer-executor.js';
+import { PerpExecutor } from './executors/perp-executor.js';
+import { PairExecutor } from './executors/pair-executor.js';
+import { StatArbPairExecutor } from './executors/stat-arb-pair-executor.js';
+import { FundingBridgeExecutor } from './executors/funding-bridge-executor.js';
+import { WithdrawalExecutor } from './executors/withdrawal-executor.js';
+import { MarketMakerExecutor } from './executors/market-maker-executor.js';
+
+// Data pipelines
+import { MarketDataService } from './data/market-data-service.js';
+import { ChainScout } from './data/chain-scout.js';
+import { OnChainIndexer } from './data/on-chain-indexer.js';
+import { SocialSentinel } from './data/social-sentinel.js';
+
+// Stat-arb pipeline
+import { HourlyPriceFeed } from './stat-arb/hourly-price-feed.js';
+import { UniverseScanner } from './stat-arb/universe-scanner.js';
+import { HyperliquidOrderManager } from './connectors/hyperliquid-order-manager.js';
+import { FundingRateTracker } from './stat-arb/funding-rate-tracker.js';
+import { SignalGenerator } from './stat-arb/signal-generator.js';
+
+// Strategies
+import { StrategyLoader } from './strategies/strategy-loader.js';
+import { StrategyRunner } from './core/strategy-runner.js';
+import type { CrossChainStrategy } from './strategies/cross-chain-strategy.js';
+
+// Types
+import type { RunnableBase } from './core/runnable-base.js';
+
 const logger = createLogger('main');
+
+const ARBITRUM_CHAIN_ID = 42161;
+const STAT_ARB_TOKENS = ['ETH', 'BTC', 'SOL', 'ARB', 'OP', 'AVAX', 'LINK', 'UNI', 'DOGE'] as const;
 
 async function main(): Promise<void> {
   const { config, secrets } = loadConfig();
@@ -33,7 +81,7 @@ async function main(): Promise<void> {
   const persistence = new PersistenceService(config.dbPath, store);
   logger.info({ dbPath: config.dbPath }, 'Persistence initialized');
 
-  // 3. Executor orchestrator + action queue (no executors registered yet — strategies will enqueue actions)
+  // 3. Executor orchestrator + action queue
   const orchestrator = new ExecutorOrchestrator();
   const actionQueue = new ActionQueue();
 
@@ -54,7 +102,6 @@ async function main(): Promise<void> {
     agent,
   });
 
-  // Start REST first so HTTP server is listening
   await restServer.start();
 
   // 6. WebSocket server — attach to same HTTP server (single port for Railway/cloud)
@@ -65,18 +112,200 @@ async function main(): Promise<void> {
   await wsServer.start();
   wsServer.subscribeToStore(store);
 
-  // Start agent loop (non-blocking — runs in background)
+  // --- Trading components (guarded on privateKey) ---
+
+  // Outer-scope references for shutdown handler
+  let strategyRunner: RunnableBase | null = null;
+  let chainScout: RunnableBase | null = null;
+  let onChainIndexer: RunnableBase | null = null;
+  let socialSentinel: RunnableBase | null = null;
+  let signalGenerator: RunnableBase | null = null;
+  let strategyRunnerPromise: Promise<void> | null = null;
+
+  if (secrets.privateKey) {
+    // 7a. Wallet setup
+    const wallet = createWalletSetup({
+      privateKey: secrets.privateKey,
+      chainRpcUrls: config.chains.rpcUrls,
+    });
+    logger.info({ address: wallet.account.address }, 'Wallet initialized');
+
+    // 7b. Connectors
+    const lifiConnector = new LiFiConnector({ apiKey: secrets.lifiApiKey });
+    const hlConnector = new HyperliquidConnector({
+      walletAddress: wallet.account.address,
+    });
+    const pearConnector = new PearProtocolConnector({
+      walletAddress: wallet.account.address,
+    });
+
+    // 7c. Utility executors (Arbitrum as primary chain)
+    const publicClient = wallet.getPublicClient(ARBITRUM_CHAIN_ID);
+    const walletClient = wallet.getWalletClient(ARBITRUM_CHAIN_ID);
+    const approvalHandler = new ApprovalHandler(publicClient, walletClient);
+    const txExecutor = new TransactionExecutor(publicClient, walletClient);
+    const preFlightChecker = new PreFlightChecker();
+
+    // 7d. Stat-arb dependencies (needed by StatArbPairExecutor)
+    const priceFeed = new HourlyPriceFeed();
+    const universeScanner = new UniverseScanner(
+      { tokens: STAT_ARB_TOKENS },
+      priceFeed,
+      store,
+    );
+    const orderManager = new HyperliquidOrderManager(hlConnector);
+    const fundingTracker = new FundingRateTracker(hlConnector);
+
+    // 7e. Trading executors — register with orchestrator
+    orchestrator.registerExecutor('swap', new SwapExecutor(
+      lifiConnector, approvalHandler, txExecutor, preFlightChecker, store,
+      { maxGasCostUsd: config.risk.maxGasCostUsd, defaultSlippage: config.risk.defaultSlippage },
+    ));
+
+    orchestrator.registerExecutor('bridge', new BridgeExecutor(
+      lifiConnector, approvalHandler, txExecutor, preFlightChecker, store,
+    ));
+
+    orchestrator.registerExecutor('composer', new ComposerExecutor(
+      lifiConnector, approvalHandler, txExecutor, preFlightChecker, store,
+    ));
+
+    orchestrator.registerExecutor('perp', new PerpExecutor(
+      hlConnector,
+      { maxLeverage: 20, defaultSlippage: 0.005, maxFundingRateThreshold: 0.01 },
+    ));
+
+    orchestrator.registerExecutor('pair', new PairExecutor(
+      pearConnector,
+      { maxLeverage: 20, maxOpenPositions: 5 },
+    ));
+
+    orchestrator.registerExecutor('stat_arb_pair', new StatArbPairExecutor(
+      hlConnector, orderManager, fundingTracker,
+    ));
+
+    orchestrator.registerExecutor('funding_bridge', new FundingBridgeExecutor(
+      lifiConnector, hlConnector, approvalHandler, txExecutor, preFlightChecker, store,
+    ));
+
+    orchestrator.registerExecutor('withdrawal', new WithdrawalExecutor(
+      lifiConnector, hlConnector, approvalHandler, txExecutor, preFlightChecker, store,
+    ));
+
+    orchestrator.registerExecutor('market_make', new MarketMakerExecutor(
+      { minCapitalUsd: 1000, maxSpread: 0.005, maxLevels: 5, staleOrderThreshold: 60, fillSimulation: false },
+    ));
+
+    // 7f. Data pipelines
+    const marketDataService = new MarketDataService({
+      mode: config.mode,
+      connector: lifiConnector,
+    });
+    await marketDataService.initialize();
+    logger.info('Market data service initialized');
+
+    const chainScoutInstance = new ChainScout({}, lifiConnector, store);
+    chainScout = chainScoutInstance;
+    chainScoutInstance.start().catch((err) =>
+      logger.error({ error: err }, 'Chain scout crashed')
+    );
+    logger.info('Chain scout started');
+
+    const indexerInstance = new OnChainIndexer();
+    onChainIndexer = indexerInstance;
+    indexerInstance.start().catch((err) =>
+      logger.error({ error: err }, 'On-chain indexer crashed')
+    );
+    logger.info('On-chain indexer started');
+
+    const sentinelInstance = new SocialSentinel();
+    socialSentinel = sentinelInstance;
+    sentinelInstance.start().catch((err) =>
+      logger.error({ error: err }, 'Social sentinel crashed')
+    );
+    logger.info('Social sentinel started');
+
+    // 7g. Stat-arb signal pipeline
+    const signalGen = new SignalGenerator({}, universeScanner, priceFeed, store);
+    signalGenerator = signalGen;
+    signalGen.start().catch((err) =>
+      logger.error({ error: err }, 'Signal generator crashed')
+    );
+    logger.info('Signal generator started');
+
+    // 7h. Strategy loading
+    const strategyLoader = new StrategyLoader();
+    await strategyLoader.discoverAll();
+
+    const strategies: CrossChainStrategy[] = [];
+    for (const name of config.strategies.enabled) {
+      try {
+        const strategy = await strategyLoader.load(name);
+        await strategy.onBotStart();
+        strategies.push(strategy);
+        logger.info({ strategy: name }, 'Strategy loaded and initialized');
+      } catch (error) {
+        logger.error({ strategy: name, error }, 'Failed to load strategy, skipping');
+      }
+    }
+
+    // 7i. Strategy runner
+    const runner = new StrategyRunner({
+      strategies,
+      marketDataService,
+      actionQueue,
+      tickIntervalMs: config.tickIntervalMs,
+    });
+    strategyRunner = runner;
+    strategyRunnerPromise = runner.start();
+    logger.info(
+      { strategies: strategies.map((s) => s.name), tickIntervalMs: config.tickIntervalMs },
+      'Strategy runner started'
+    );
+
+    // 7j. Notify dashboard
+    wsServer.emitAgentEvent('AGENT_STARTED', {
+      mode: config.mode,
+      strategies: strategies.map((s) => s.name),
+      chains: config.chains.enabled,
+      walletAddress: wallet.account.address,
+      timestamp: Date.now(),
+    });
+  } else {
+    logger.warn('No CYRUS_PRIVATE_KEY set — running in monitoring-only mode (no trading)');
+  }
+
+  // Start agent OODA loop (non-blocking — runs in background)
   const agentPromise = agent.start();
   logger.info('Cyrus agent OODA loop started');
 
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+
+    // 1. Stop strategy runner first (stops enqueuing new actions)
+    if (strategyRunner) {
+      strategyRunner.stop();
+      if (strategyRunnerPromise) await strategyRunnerPromise;
+    }
+
+    // 2. Stop data pipelines
+    if (signalGenerator) signalGenerator.stop();
+    if (chainScout) chainScout.stop();
+    if (onChainIndexer) onChainIndexer.stop();
+    if (socialSentinel) socialSentinel.stop();
+
+    // 3. Stop agent (finishes processing current queue)
     agent.stop();
     await agentPromise;
+
+    // 4. Servers
     await wsServer.stop();
     await restServer.stop();
+
+    // 5. Persistence
     persistence.close();
+
     logger.info('Cyrus agent shut down cleanly');
     await Sentry.close(2000);
     process.exit(0);
