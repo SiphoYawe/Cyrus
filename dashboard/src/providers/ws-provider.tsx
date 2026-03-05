@@ -39,6 +39,33 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     clientRef.current?.send(command);
   }, []);
 
+  // Poll health endpoint to get initial agent status
+  useEffect(() => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
+    let cancelled = false;
+
+    const pollHealth = async () => {
+      try {
+        const res = await fetch(`${apiUrl}/api/health`, { signal: AbortSignal.timeout(5000) });
+        if (!res.ok || cancelled) return;
+        const body = await res.json();
+        if (cancelled) return;
+        const agentStatus = body?.data?.status;
+        if (agentStatus === 'healthy') {
+          useAgentStore.getState().setStatus('running');
+        } else if (agentStatus === 'degraded') {
+          useAgentStore.getState().setStatus('stopped');
+        }
+      } catch {
+        // Backend unreachable — status stays unknown
+      }
+    };
+
+    pollHealth();
+    const interval = setInterval(pollHealth, 30_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
   useEffect(() => {
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:8080';
     const client = new WebSocketClient(wsUrl);
