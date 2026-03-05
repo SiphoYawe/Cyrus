@@ -272,4 +272,80 @@ describe('FundingController', () => {
       expect(queue.size()).toBe(firstSize);
     });
   });
+
+  describe('cooldown', () => {
+    it('prevents re-evaluation within cooldown window', async () => {
+      store.setBalance(CHAINS.ETHEREUM, ETH_USDC, 500_000_000n, 500, 'USDC', 6);
+      store.setBalance(CHAINS.ARBITRUM, ARB_USDC, 0n, 0, 'USDC', 6);
+
+      const signal1 = makeSignal({ signalId: 'sig-1' });
+      store.addStatArbSignal(signal1);
+
+      const controller = new FundingController(store, queue, {
+        ...defaultConfig,
+        fundingCooldownMs: 60_000, // 60s cooldown
+      });
+
+      // First tick — should emit actions and set cooldown
+      await controller.controlTask();
+      expect(queue.isEmpty()).toBe(false);
+      expect(controller.getLastFundingCycleTime()).toBeGreaterThan(0);
+
+      // Drain queue
+      while (!queue.isEmpty()) queue.dequeue();
+
+      // Add new signal
+      const signal2 = makeSignal({ signalId: 'sig-2' });
+      store.addStatArbSignal(signal2);
+
+      // Second tick within cooldown — should skip
+      await controller.controlTask();
+      expect(queue.isEmpty()).toBe(true);
+    });
+
+    it('resumes evaluation after cooldown expires', async () => {
+      store.setBalance(CHAINS.ETHEREUM, ETH_USDC, 500_000_000n, 500, 'USDC', 6);
+      store.setBalance(CHAINS.ARBITRUM, ARB_USDC, 0n, 0, 'USDC', 6);
+
+      const signal = makeSignal();
+      store.addStatArbSignal(signal);
+
+      const controller = new FundingController(store, queue, {
+        ...defaultConfig,
+        fundingCooldownMs: 10, // very short cooldown for testing
+      });
+
+      // First tick — emits actions
+      await controller.controlTask();
+      expect(queue.isEmpty()).toBe(false);
+
+      // Wait for cooldown to expire
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Drain queue and clear batches by completing them
+      while (!queue.isEmpty()) queue.dequeue();
+
+      // Add new signal (different signalId so no batch conflict)
+      const signal2 = makeSignal({ signalId: 'sig-after-cooldown' });
+      store.addStatArbSignal(signal2);
+
+      // Third tick after cooldown — should evaluate
+      await controller.controlTask();
+      expect(queue.isEmpty()).toBe(false);
+    });
+
+    it('uses configured cooldown value', () => {
+      const controller = new FundingController(store, queue, {
+        ...defaultConfig,
+        fundingCooldownMs: 300_000,
+      });
+
+      expect(controller.getConfig().fundingCooldownMs).toBe(300_000);
+    });
+
+    it('defaults to 10 minutes cooldown', () => {
+      const controller = new FundingController(store, queue);
+      expect(controller.getConfig().fundingCooldownMs).toBe(600_000);
+    });
+  });
 });

@@ -30,6 +30,8 @@ export interface FundingControllerConfig {
   readonly tickIntervalMs: number;
   /** EVM chains to scan for USDC balances */
   readonly sourceChains: readonly ChainId[];
+  /** Cooldown between funding cycles in ms (default 600_000 = 10 min) */
+  readonly fundingCooldownMs: number;
 }
 
 const DEFAULT_CONFIG: FundingControllerConfig = {
@@ -46,6 +48,7 @@ const DEFAULT_CONFIG: FundingControllerConfig = {
     CHAINS.BASE,
     CHAINS.BSC,
   ],
+  fundingCooldownMs: 600_000, // 10 minutes
 };
 
 // --- Types ---
@@ -85,6 +88,7 @@ export class FundingController extends RunnableBase {
   private readonly actionQueue: ActionQueue;
   private readonly config: FundingControllerConfig;
   private readonly activeBatches: Map<string, FundingBatch> = new Map();
+  private lastFundingCycleTime = 0;
 
   constructor(
     store: Store,
@@ -99,6 +103,16 @@ export class FundingController extends RunnableBase {
   }
 
   async controlTask(): Promise<void> {
+    // Cooldown check — prevent rapid-fire funding cycles
+    const elapsed = Date.now() - this.lastFundingCycleTime;
+    if (this.lastFundingCycleTime > 0 && elapsed < this.config.fundingCooldownMs) {
+      logger.debug(
+        { remainingMs: this.config.fundingCooldownMs - elapsed },
+        'Funding cooldown active, skipping evaluation',
+      );
+      return;
+    }
+
     // Check pending stat arb signals that need funding
     const pendingSignals = this.store.getPendingSignals();
     if (pendingSignals.length === 0) return;
@@ -131,6 +145,7 @@ export class FundingController extends RunnableBase {
 
       const batch = this.createBatch(signal.signalId, request.deficit, plans);
       this.emitFundingActions(batch);
+      this.lastFundingCycleTime = Date.now();
     }
   }
 
@@ -462,5 +477,9 @@ export class FundingController extends RunnableBase {
 
   getConfig(): FundingControllerConfig {
     return this.config;
+  }
+
+  getLastFundingCycleTime(): number {
+    return this.lastFundingCycleTime;
   }
 }
