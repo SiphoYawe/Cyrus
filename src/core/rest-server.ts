@@ -85,7 +85,15 @@ export class AgentRestServer {
 
   async start(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      this.server.once('error', reject);
+      this.server.once('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE') {
+          logger.error(
+            { port: this.port },
+            `Port ${this.port} is already in use. Is another Cyrus instance running?`,
+          );
+        }
+        reject(err);
+      });
       this.server.listen(this.port, () => {
         const addr = this.server.address();
         const boundPort = typeof addr === 'object' && addr ? addr.port : this.port;
@@ -96,6 +104,10 @@ export class AgentRestServer {
   }
 
   async stop(): Promise<void> {
+    if (!this.server.listening) {
+      logger.debug('REST server already stopped, skipping close');
+      return;
+    }
     return new Promise<void>((resolve, reject) => {
       this.server.close((err) => {
         if (err) {

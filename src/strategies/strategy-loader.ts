@@ -1,12 +1,17 @@
 import { readdir, readFile } from 'node:fs/promises';
-import { resolve, join, basename } from 'node:path';
+import { resolve, join, basename, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createLogger } from '../utils/logger.js';
 import { CrossChainStrategy } from './cross-chain-strategy.js';
 import { StrategyConfigError } from '../utils/errors.js';
 
 const logger = createLogger('strategy-loader');
 
-const STRATEGY_PATTERN = /extends\s+CrossChainStrategy/;
+const STRATEGY_PATTERN_TS = /extends\s+CrossChainStrategy/;
+const STRATEGY_PATTERN_JS = /CrossChainStrategy/;
+
+const __filename_loader = fileURLToPath(import.meta.url);
+const __dirname_loader = dirname(__filename_loader);
 
 export interface DiscoveryResult {
   readonly loaded: string[];
@@ -20,7 +25,9 @@ export class StrategyLoader {
   private scanned = false;
 
   constructor(searchPaths?: string[]) {
-    this.searchPaths = searchPaths ?? ['./strategies', './src/strategies/builtin'];
+    // Use __dirname-relative path so it works from both src (tsx) and dist (node)
+    const builtinDir = join(__dirname_loader, 'builtin');
+    this.searchPaths = searchPaths ?? ['./strategies', builtinDir];
   }
 
   async discoverAll(): Promise<DiscoveryResult> {
@@ -59,19 +66,28 @@ export class StrategyLoader {
     let entries: string[];
     try {
       const dirEntries = await readdir(absDir);
-      entries = dirEntries.filter((e) => e.endsWith('.ts') && !e.endsWith('.test.ts') && !e.endsWith('.d.ts'));
+      entries = dirEntries.filter((e) =>
+        (e.endsWith('.ts') || e.endsWith('.js')) &&
+        !e.endsWith('.test.ts') &&
+        !e.endsWith('.test.js') &&
+        !e.endsWith('.d.ts') &&
+        !e.endsWith('.d.ts.map') &&
+        !e.endsWith('.js.map'),
+      );
     } catch {
       return result;
     }
 
     for (const entry of entries) {
       const filePath = join(absDir, entry);
+      const ext = entry.endsWith('.ts') ? '.ts' : '.js';
       try {
         const content = await readFile(filePath, 'utf-8');
-        if (!STRATEGY_PATTERN.test(content)) {
+        const pattern = ext === '.ts' ? STRATEGY_PATTERN_TS : STRATEGY_PATTERN_JS;
+        if (!pattern.test(content)) {
           continue; // fast pre-check: not a strategy file
         }
-        const name = basename(entry, '.ts');
+        const name = basename(entry, ext);
         result.set(name, filePath);
       } catch (err) {
         logger.warn({ file: filePath, error: (err as Error).message }, 'Failed to read strategy file');
@@ -91,7 +107,14 @@ export class StrategyLoader {
       await this.discoverAll();
     }
 
-    const filePath = this.discovered.get(strategyName);
+    // Try exact match first, then kebab-case conversion (PascalCase → kebab-case)
+    let filePath = this.discovered.get(strategyName);
+    if (!filePath) {
+      const kebab = strategyName
+        .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+        .toLowerCase();
+      filePath = this.discovered.get(kebab);
+    }
     if (!filePath) {
       throw new Error(
         `Strategy "${strategyName}" not found. Available: [${Array.from(this.discovered.keys()).join(', ')}]`,

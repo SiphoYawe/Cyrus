@@ -299,9 +299,13 @@ async function main(): Promise<void> {
     agent.stop();
     await agentPromise;
 
-    // 4. Servers
-    await wsServer.stop();
-    await restServer.stop();
+    // 4. Servers (guard against already-stopped servers)
+    try { await wsServer.stop(); } catch (err) {
+      logger.debug({ error: err }, 'WebSocket server stop error (non-fatal)');
+    }
+    try { await restServer.stop(); } catch (err) {
+      logger.debug({ error: err }, 'REST server stop error (non-fatal)');
+    }
 
     // 5. Persistence
     persistence.close();
