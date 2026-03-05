@@ -2,6 +2,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Store } from '../store.js';
+import type { SocialSourceStatus } from '../../data/social-sentinel.js';
 import { sendSuccess, sendError, ERROR_CODES } from '../rest-types.js';
 
 export interface DetailedHealthResponse {
@@ -25,11 +26,13 @@ export interface DetailedHealthResponse {
   };
   regime: string | null;
   lastDecisionAt: number | null;
+  socialSources?: SocialSourceStatus[];
 }
 
 export interface DetailedHealthDeps {
   getTickCount: () => number;
   isRunning: () => boolean;
+  getSocialSourceStatus?: () => SocialSourceStatus[];
 }
 
 export function createDetailedHealthHandler(store: Store, deps?: DetailedHealthDeps) {
@@ -73,6 +76,7 @@ export function createDetailedHealthHandler(store: Store, deps?: DetailedHealthD
       },
       regime: regime?.regime ?? null,
       lastDecisionAt,
+      socialSources: deps?.getSocialSourceStatus?.() ?? undefined,
     };
 
     sendSuccess(res, data);

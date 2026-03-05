@@ -16,6 +16,14 @@ import type {
   RawSocialData,
 } from './social-types.js';
 
+export interface SocialSourceStatus {
+  readonly source: string;
+  readonly status: 'active' | 'disabled' | 'error';
+  readonly reason?: string;
+  readonly lastPollTime: number | null;
+  readonly signalCount: number;
+}
+
 export class SocialSentinel extends RunnableBase {
   readonly events = new EventEmitter();
   private readonly config: SocialSentinelConfig;
@@ -25,17 +33,56 @@ export class SocialSentinel extends RunnableBase {
   private signalCounter = 0;
   private anthropic: Anthropic | null = null;
   private sentimentCallCount = 0;
+  private sentimentFallbackCount = 0;
   private sentimentCallResetTime = 0;
+  private diagnosticLogged = false;
+
+  // Per-source tracking
+  private readonly sourceLastPollTime = new Map<string, number>();
+  private readonly sourceSignalCount = new Map<string, number>();
+
+  // Source availability
+  private readonly twitterEnabled: boolean;
+  private readonly discordEnabled: boolean;
+  private readonly telegramEnabled: boolean;
+  private readonly governanceEnabled: boolean;
+  private readonly sentimentAiEnabled: boolean;
 
   constructor(config: Partial<SocialSentinelConfig> = {}) {
     super(60_000, 'social-sentinel');
-    this.config = { ...DEFAULT_SOCIAL_SENTINEL_CONFIG, ...config };
+
+    // Parse comma-separated env vars for influencers/channels
+    const envInfluencers = process.env['TWITTER_INFLUENCERS']
+      ? process.env['TWITTER_INFLUENCERS'].split(',').map(s => s.trim()).filter(Boolean)
+      : [];
+    const envDiscordChannels = process.env['DISCORD_CHANNELS']
+      ? process.env['DISCORD_CHANNELS'].split(',').map(s => s.trim()).filter(Boolean)
+      : [];
+    const envTelegramChannels = process.env['TELEGRAM_CHANNELS']
+      ? process.env['TELEGRAM_CHANNELS'].split(',').map(s => s.trim()).filter(Boolean)
+      : [];
+
+    this.config = {
+      ...DEFAULT_SOCIAL_SENTINEL_CONFIG,
+      // Env vars override defaults if set
+      twitterInfluencers: envInfluencers.length > 0 ? envInfluencers : DEFAULT_SOCIAL_SENTINEL_CONFIG.twitterInfluencers,
+      discordChannels: envDiscordChannels.length > 0 ? envDiscordChannels : DEFAULT_SOCIAL_SENTINEL_CONFIG.discordChannels,
+      telegramChannels: envTelegramChannels.length > 0 ? envTelegramChannels : DEFAULT_SOCIAL_SENTINEL_CONFIG.telegramChannels,
+      ...config,
+    };
 
     // Initialize Anthropic client if API key is available
     const apiKey = process.env['ANTHROPIC_API_KEY'];
     if (apiKey) {
       this.anthropic = new Anthropic({ apiKey });
     }
+
+    // Determine source availability from environment
+    this.twitterEnabled = !!process.env['TWITTER_BEARER_TOKEN'] && this.config.twitterInfluencers.length > 0;
+    this.discordEnabled = !!process.env['DISCORD_BOT_TOKEN'] && this.config.discordChannels.length > 0;
+    this.telegramEnabled = !!process.env['TELEGRAM_BOT_TOKEN'] && this.config.telegramChannels.length > 0;
+    this.governanceEnabled = this.config.governanceProtocols.length > 0;
+    this.sentimentAiEnabled = !!this.anthropic;
   }
 
   private nextSignalId(): string {
@@ -43,12 +90,20 @@ export class SocialSentinel extends RunnableBase {
   }
 
   async controlTask(): Promise<void> {
-    const results = await Promise.allSettled([
-      this.pollTwitter(),
-      this.pollDiscord(),
-      this.pollTelegram(),
-      this.pollGovernance(),
-    ]);
+    // Log startup diagnostic on first tick
+    if (!this.diagnosticLogged) {
+      this.logDiagnostic();
+      this.diagnosticLogged = true;
+    }
+
+    // Only poll enabled sources
+    const polls: Promise<RawSocialData[]>[] = [];
+    if (this.twitterEnabled) polls.push(this.pollTwitter().then(r => { this.sourceLastPollTime.set('twitter', Date.now()); return r; }));
+    if (this.discordEnabled) polls.push(this.pollDiscord().then(r => { this.sourceLastPollTime.set('discord', Date.now()); return r; }));
+    if (this.telegramEnabled) polls.push(this.pollTelegram().then(r => { this.sourceLastPollTime.set('telegram', Date.now()); return r; }));
+    if (this.governanceEnabled) polls.push(this.pollGovernance().then(r => { this.sourceLastPollTime.set('governance', Date.now()); return r; }));
+
+    const results = await Promise.allSettled(polls);
 
     const rawSignals: RawSocialData[] = [];
     for (const result of results) {
@@ -65,17 +120,80 @@ export class SocialSentinel extends RunnableBase {
         const signal = await this.analyzeSentiment(raw);
         this.addSignal(signal);
         this.events.emit('social_signal', signal);
+        // Track per-source signal count
+        this.sourceSignalCount.set(raw.source, (this.sourceSignalCount.get(raw.source) ?? 0) + 1);
       } catch (err) {
         this.logger.warn({ error: (err as Error).message }, 'Sentiment analysis failed, using fallback');
         const fallback = this.createFallbackSignal(raw);
         this.addSignal(fallback);
         this.events.emit('social_signal', fallback);
+        this.sourceSignalCount.set(raw.source, (this.sourceSignalCount.get(raw.source) ?? 0) + 1);
       }
     }
 
     // Consolidate and prune
     this.consolidateSignals();
     this.pruneExpiredSignals();
+  }
+
+  private logDiagnostic(): void {
+    const sources = [
+      { name: 'Twitter', enabled: this.twitterEnabled, reason: !process.env['TWITTER_BEARER_TOKEN'] ? 'TWITTER_BEARER_TOKEN not set' : `${this.config.twitterInfluencers.length} influencers configured` },
+      { name: 'Discord', enabled: this.discordEnabled, reason: !process.env['DISCORD_BOT_TOKEN'] ? 'DISCORD_BOT_TOKEN not set' : `${this.config.discordChannels.length} channels configured` },
+      { name: 'Telegram', enabled: this.telegramEnabled, reason: !process.env['TELEGRAM_BOT_TOKEN'] ? 'TELEGRAM_BOT_TOKEN not set' : `${this.config.telegramChannels.length} channels configured` },
+      { name: 'Governance', enabled: this.governanceEnabled, reason: `${this.config.governanceProtocols.length} protocols configured` },
+      { name: 'Sentiment AI', enabled: this.sentimentAiEnabled, reason: !process.env['ANTHROPIC_API_KEY'] ? 'ANTHROPIC_API_KEY not set' : 'Claude API available' },
+    ];
+
+    const lines = sources.map(s => `  ${s.name}: ${s.enabled ? 'ACTIVE' : 'DISABLED'} (${s.reason})`);
+    this.logger.info({ sources: sources.map(s => ({ name: s.name, enabled: s.enabled })) }, `Social Sentinel sources:\n${lines.join('\n')}`);
+  }
+
+  getSocialSourceStatus(): SocialSourceStatus[] {
+    return [
+      {
+        source: 'twitter',
+        status: this.twitterEnabled ? 'active' : 'disabled',
+        reason: this.twitterEnabled ? undefined : 'TWITTER_BEARER_TOKEN not set',
+        lastPollTime: this.sourceLastPollTime.get('twitter') ?? null,
+        signalCount: this.sourceSignalCount.get('twitter') ?? 0,
+      },
+      {
+        source: 'discord',
+        status: this.discordEnabled ? 'active' : 'disabled',
+        reason: this.discordEnabled ? undefined : 'DISCORD_BOT_TOKEN not set',
+        lastPollTime: this.sourceLastPollTime.get('discord') ?? null,
+        signalCount: this.sourceSignalCount.get('discord') ?? 0,
+      },
+      {
+        source: 'telegram',
+        status: this.telegramEnabled ? 'active' : 'disabled',
+        reason: this.telegramEnabled ? undefined : 'TELEGRAM_BOT_TOKEN not set',
+        lastPollTime: this.sourceLastPollTime.get('telegram') ?? null,
+        signalCount: this.sourceSignalCount.get('telegram') ?? 0,
+      },
+      {
+        source: 'governance',
+        status: this.governanceEnabled ? 'active' : 'disabled',
+        reason: this.governanceEnabled ? undefined : 'No governance protocols configured',
+        lastPollTime: this.sourceLastPollTime.get('governance') ?? null,
+        signalCount: this.sourceSignalCount.get('governance') ?? 0,
+      },
+      {
+        source: 'sentiment_ai',
+        status: this.sentimentAiEnabled ? 'active' : 'disabled',
+        reason: this.sentimentAiEnabled ? undefined : 'ANTHROPIC_API_KEY not set',
+        lastPollTime: null,
+        signalCount: this.sentimentCallCount,
+      },
+    ];
+  }
+
+  getSentimentMetrics(): { apiCalls: number; fallbackCalls: number } {
+    return {
+      apiCalls: this.sentimentCallCount,
+      fallbackCalls: this.sentimentFallbackCount,
+    };
   }
 
   async onStop(): Promise<void> {
@@ -467,6 +585,7 @@ Example: {"sentiment": 0.7, "urgency": "medium", "token": "ETH", "reasoning": "B
     }
 
     // Fallback: basic keyword-based sentiment
+    this.sentimentFallbackCount++;
     const text = raw.text.toLowerCase();
     const bullishWords = ['bullish', 'moon', 'pump', 'buy', 'long', 'breakout', 'ath', 'rally', 'surge'];
     const bearishWords = ['bearish', 'dump', 'sell', 'short', 'crash', 'rug', 'scam', 'drop', 'plunge'];

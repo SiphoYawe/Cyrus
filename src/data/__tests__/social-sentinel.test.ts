@@ -27,10 +27,32 @@ function makeRaw(overrides: Partial<RawSocialData> = {}): RawSocialData {
 
 describe('SocialSentinel', () => {
   let sentinel: SocialSentinel;
+  const originalEnv = { ...process.env };
+
+  function enableTwitter(): void {
+    process.env['TWITTER_BEARER_TOKEN'] = 'test-token';
+    process.env['TWITTER_INFLUENCERS'] = 'testuser1,testuser2';
+  }
+
+  function enableDiscord(): void {
+    process.env['DISCORD_BOT_TOKEN'] = 'test-bot-token';
+    process.env['DISCORD_CHANNELS'] = 'channel1,channel2';
+  }
 
   beforeEach(() => {
+    // Clear social env vars for clean state
+    delete process.env['TWITTER_BEARER_TOKEN'];
+    delete process.env['DISCORD_BOT_TOKEN'];
+    delete process.env['TELEGRAM_BOT_TOKEN'];
+    delete process.env['TWITTER_INFLUENCERS'];
+    delete process.env['DISCORD_CHANNELS'];
+    delete process.env['TELEGRAM_CHANNELS'];
     sentinel = createSentinel();
     sentinel.resetState();
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
   });
 
   describe('initialization', () => {
@@ -49,6 +71,8 @@ describe('SocialSentinel', () => {
   describe('Twitter polling', () => {
     it('returns RawSocialData with correct structure', async () => {
       const raw = makeRaw({ source: 'twitter' });
+      enableTwitter();
+      sentinel = createSentinel();
       sentinel.pollTwitter = vi.fn().mockResolvedValue([raw]);
 
       await sentinel.controlTask();
@@ -126,6 +150,8 @@ describe('SocialSentinel', () => {
         source: 'discord',
         text: 'Just saw $PEPE pumping on Uniswap, entry at 0.00001',
       });
+      enableDiscord();
+      sentinel = createSentinel();
       sentinel.pollDiscord = vi.fn().mockResolvedValue([raw]);
 
       await sentinel.controlTask();
@@ -164,6 +190,8 @@ describe('SocialSentinel', () => {
   describe('sentiment analysis', () => {
     it('produces valid SocialSignal with correct score range', async () => {
       const raw = makeRaw({ text: '$BTC to 100k! Super bullish' });
+      enableTwitter();
+      sentinel = createSentinel();
 
       // Mock analyzeSentiment to return a scored signal
       sentinel.analyzeSentiment = vi.fn().mockResolvedValue({
@@ -191,6 +219,8 @@ describe('SocialSentinel', () => {
 
     it('falls back to neutral sentiment on Claude API failure', async () => {
       const raw = makeRaw();
+      enableTwitter();
+      sentinel = createSentinel();
       sentinel.pollTwitter = vi.fn().mockResolvedValue([raw]);
       sentinel.analyzeSentiment = vi.fn().mockRejectedValue(new Error('Claude API timeout'));
 
@@ -209,6 +239,9 @@ describe('SocialSentinel', () => {
       const raw1 = makeRaw({ text: '$ETH is pumping', author: 'user1', timestamp: now - 60_000 });
       const raw2 = makeRaw({ text: '$ETH breakout incoming', author: 'user2', source: 'discord', timestamp: now - 30_000 });
 
+      enableTwitter();
+      enableDiscord();
+      sentinel = createSentinel();
       sentinel.pollTwitter = vi.fn()
         .mockResolvedValueOnce([raw1])
         .mockResolvedValueOnce([]);
@@ -229,6 +262,9 @@ describe('SocialSentinel', () => {
     it('has combined sentiment score and elevated urgency', async () => {
       const now = Date.now();
 
+      enableTwitter();
+      enableDiscord();
+      sentinel = createSentinel();
       // Create signals from multiple sources for consolidation
       sentinel.analyzeSentiment = vi.fn()
         .mockResolvedValueOnce({
@@ -261,6 +297,8 @@ describe('SocialSentinel', () => {
     it('deduplicates same author + same token within 5 min', async () => {
       const now = Date.now();
 
+      enableTwitter();
+      sentinel = createSentinel();
       // Same author, same token, within 5 min
       sentinel.analyzeSentiment = vi.fn()
         .mockResolvedValueOnce({
@@ -382,6 +420,8 @@ describe('SocialSentinel', () => {
 
   describe('resetState', () => {
     it('clears all internal state', async () => {
+      enableTwitter();
+      sentinel = createSentinel();
       sentinel.pollTwitter = vi.fn().mockResolvedValue([makeRaw()]);
       await sentinel.controlTask();
       expect(sentinel.signalCount).toBeGreaterThan(0);
@@ -394,6 +434,9 @@ describe('SocialSentinel', () => {
 
   describe('controlTask resilience', () => {
     it('continues when one source fails', async () => {
+      enableTwitter();
+      enableDiscord();
+      sentinel = createSentinel();
       sentinel.pollTwitter = vi.fn().mockRejectedValue(new Error('Twitter API down'));
       sentinel.pollDiscord = vi.fn().mockResolvedValue([makeRaw({ source: 'discord', text: '$LINK alpha call' })]);
 

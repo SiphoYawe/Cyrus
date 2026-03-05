@@ -43,6 +43,8 @@ import { MarketDataService } from './data/market-data-service.js';
 import { ChainScout } from './data/chain-scout.js';
 import { OnChainIndexer } from './data/on-chain-indexer.js';
 import { SocialSentinel } from './data/social-sentinel.js';
+import { SignalAggregator } from './data/signal-aggregator.js';
+import { SocialEvaluator } from './data/evaluators/social-evaluator.js';
 
 // Stat-arb pipeline
 import { HourlyPriceFeed } from './stat-arb/hourly-price-feed.js';
@@ -275,6 +277,12 @@ async function main(): Promise<void> {
       logger.error({ error: err }, 'Social sentinel crashed')
     );
     logger.info('Social sentinel started');
+
+    // Wire SignalAggregator with SocialEvaluator (subscribes to social_signal events)
+    const socialEvaluator = new SocialEvaluator(sentinelInstance);
+    const signalAggregator = new SignalAggregator();
+    signalAggregator.registerEvaluator(socialEvaluator);
+    logger.info('Signal aggregator wired with social evaluator');
 
     // 7g. Stat-arb signal pipeline
     const signalGen = new SignalGenerator({}, universeScanner, priceFeed, store);
