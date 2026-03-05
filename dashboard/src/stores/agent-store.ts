@@ -70,6 +70,19 @@ export const useAgentStore = create<AgentState>()((set) => ({
           activeStrategies: (event.data as { strategies: string[] }).strategies,
         });
         break;
+      case WS_EVENT_TYPES.CONFIG_UPDATED: {
+        const data = event.data as Record<string, unknown>;
+        set((state) => ({
+          config: state.config ? {
+            ...state.config,
+            mode: (data.mode as string) ?? state.config.mode,
+            tickIntervalMs: (data.tickIntervalMs as number) ?? state.config.tickIntervalMs,
+            chains: (data.chains as { enabled: number[] })?.enabled ?? state.config.chains,
+            strategies: (data.strategies as { enabled: string[] })?.enabled ?? state.config.strategies,
+          } : null,
+        }));
+        break;
+      }
     }
   },
 }));

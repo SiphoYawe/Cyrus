@@ -121,6 +121,27 @@ describe('RunnableBase', () => {
     expect(onStopCalled).toBe(true);
   });
 
+  it('setTickInterval updates the tick interval for the next sleep cycle', async () => {
+    const runnable = new TestRunnable(100);
+    expect(runnable.getTickIntervalMs()).toBe(100);
+
+    let ticks = 0;
+    runnable.controlTaskFn = async () => {
+      ticks++;
+      if (ticks === 1) {
+        // Update interval via protected method (accessible in subclass)
+        (runnable as unknown as { setTickInterval: (ms: number) => void }).setTickInterval(5);
+      }
+      if (ticks >= 3) {
+        runnable.stop();
+      }
+    };
+
+    await runnable.start();
+    expect(ticks).toBe(3);
+    expect(runnable.getTickIntervalMs()).toBe(5);
+  });
+
   it('returns correct isRunning state', async () => {
     const runnable = new TestRunnable(5);
     expect(runnable.isRunning()).toBe(false);

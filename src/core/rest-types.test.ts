@@ -103,9 +103,9 @@ describe('rest-types', () => {
       expect(ERROR_CODES.METHOD_NOT_ALLOWED).toBe('METHOD_NOT_ALLOWED');
     });
 
-    it('is a frozen-like const object with 5 entries', () => {
+    it('is a frozen-like const object with 6 entries', () => {
       const keys = Object.keys(ERROR_CODES);
-      expect(keys).toHaveLength(5);
+      expect(keys).toHaveLength(6);
     });
   });
 });

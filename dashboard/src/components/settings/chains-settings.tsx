@@ -1,10 +1,11 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Switch } from '@/components/ui/switch';
+import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
-import { useWebSocket } from '@/providers/ws-provider';
-import { WS_COMMANDS } from '@/types/ws';
+import { useConfig } from '@/hooks/use-config';
+import { useAgentStore } from '@/stores/agent-store';
 import { toast } from 'sonner';
 
 interface ChainConfig {
@@ -40,30 +41,85 @@ interface ChainsSettingsProps {
 }
 
 export function ChainsSettings({ className }: ChainsSettingsProps) {
-  const { send } = useWebSocket();
+  const { config, isLoading, updateConfig } = useConfig();
+  const agentStatus = useAgentStore((s) => s.status);
+  const isOffline = agentStatus === 'unknown' || agentStatus === 'stopped';
 
   const [enabled, setEnabled] = useState<Record<number, boolean>>(() =>
     Object.fromEntries(SUPPORTED_CHAINS.map((c) => [c.id, true])),
   );
 
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Hydrate from backend config
+  useEffect(() => {
+    if (config?.chains?.enabled) {
+      const enabledSet = new Set(config.chains.enabled);
+      setEnabled(
+        Object.fromEntries(SUPPORTED_CHAINS.map((c) => [c.id, enabledSet.has(c.id)])),
+      );
+    }
+  }, [config]);
+
+  const envOverrides = config?.envOverrides ?? [];
+  const isChainsOverridden = envOverrides.includes('chains.enabled');
+
   const handleToggle = useCallback(
     (chainId: number, value: boolean) => {
+      const prevEnabled = { ...enabled };
+
       // Optimistic update
-      setEnabled((prev) => ({ ...prev, [chainId]: value }));
+      const newEnabled = { ...enabled, [chainId]: value };
+      setEnabled(newEnabled);
 
-      send({
-        command: WS_COMMANDS.CONFIG_UPDATE,
-        payload: { chains: { [chainId]: value } },
-      });
+      const newEnabledList = SUPPORTED_CHAINS
+        .filter((c) => newEnabled[c.id])
+        .map((c) => c.id);
 
-      const chain = SUPPORTED_CHAINS.find((c) => c.id === chainId);
-      toast.success(`${chain?.name ?? 'Chain'} ${value ? 'enabled' : 'disabled'}.`);
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        updateConfig({ chains: { enabled: newEnabledList } })
+          .then(() => {
+            const chain = SUPPORTED_CHAINS.find((c) => c.id === chainId);
+            toast.success(`${chain?.name ?? 'Chain'} ${value ? 'enabled' : 'disabled'}.`, { duration: 4000 });
+          })
+          .catch((err) => {
+            // Rollback
+            setEnabled(prevEnabled);
+            const message = err instanceof Error ? err.message : 'Update failed';
+            toast.error(message, {
+              duration: Infinity,
+              action: {
+                label: 'Retry',
+                onClick: () => handleToggle(chainId, value),
+              },
+            });
+          });
+      }, 600);
     },
-    [send],
+    [enabled, updateConfig],
   );
 
+  if (isLoading && !config) {
+    return (
+      <div className={cn('space-y-3', className)}>
+        {[1, 2, 3, 4, 5, 6].map((i) => (
+          <Skeleton key={i} className="h-16 w-full rounded-lg" />
+        ))}
+      </div>
+    );
+  }
+
   return (
-    <div className={cn('space-y-3', className)}>
+    <div
+      className={cn('space-y-3', className)}
+      title={isOffline ? 'Agent offline — settings are read-only' : undefined}
+    >
+      {isChainsOverridden && (
+        <p className="text-xs text-amber-400 mb-2">
+          Chain selection is set by environment variable
+        </p>
+      )}
       {SUPPORTED_CHAINS.map((chain) => (
         <div
           key={chain.id}
@@ -79,7 +135,9 @@ export function ChainsSettings({ className }: ChainsSettingsProps) {
           <Switch
             checked={enabled[chain.id] ?? true}
             onCheckedChange={(v) => handleToggle(chain.id, v)}
+            disabled={isOffline || isChainsOverridden}
             aria-label={`Toggle ${chain.name}`}
+            className={cn((isOffline || isChainsOverridden) && 'opacity-50')}
           />
         </div>
       ))}

@@ -35,6 +35,8 @@ export const WS_EVENT_TYPES = {
   // Recovery events
   RECOVERY_OPTIONS: 'recovery.options',
   RECOVERY_SELECTION: 'recovery.selection',
+  // Config events
+  CONFIG_UPDATED: 'config.updated',
 } as const;
 
 export type WsEventType = (typeof WS_EVENT_TYPES)[keyof typeof WS_EVENT_TYPES];
@@ -52,6 +54,7 @@ export const WS_COMMANDS = {
   STRATEGY_ENABLE: 'strategy.enable',
   STRATEGY_DISABLE: 'strategy.disable',
   CONFIG_GET: 'config.get',
+  CONFIG_UPDATE: 'config.update',
 } as const;
 
 export type WsCommandType = (typeof WS_COMMANDS)[keyof typeof WS_COMMANDS];

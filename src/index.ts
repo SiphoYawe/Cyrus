@@ -2,7 +2,9 @@ import { initSentry, captureError, Sentry } from './utils/sentry.js';
 
 initSentry();
 
+import { resolve } from 'node:path';
 import { loadConfig } from './core/config.js';
+import { ConfigManager, buildEnvOverrides } from './core/config-manager.js';
 import { createLogger } from './utils/logger.js';
 import { Store } from './core/store.js';
 import { PersistenceService } from './core/persistence.js';
@@ -64,6 +66,11 @@ const STAT_ARB_TOKENS = ['ETH', 'BTC', 'SOL', 'ARB', 'OP', 'AVAX', 'LINK', 'UNI'
 
 async function main(): Promise<void> {
   const { config, secrets } = loadConfig();
+  const configManager = new ConfigManager(
+    config,
+    buildEnvOverrides(),
+    resolve(process.cwd(), 'cyrus.config.json'),
+  );
 
   logger.info(
     {
@@ -92,13 +99,14 @@ async function main(): Promise<void> {
     executorOrchestrator: orchestrator,
   });
 
-  // 5. REST server
+  // 5. REST server (ConfigManager wired later after wsServer is created)
   const restServer = new AgentRestServer({
     port: config.rest.port,
     corsOrigin: config.rest.corsOrigin,
     store,
     persistence,
     config,
+    configManager,
     agent,
   });
 
@@ -111,6 +119,16 @@ async function main(): Promise<void> {
 
   await wsServer.start();
   wsServer.subscribeToStore(store);
+
+  // Wire wsServer to REST config handler for broadcasting config updates
+  restServer.setWsServer(wsServer);
+
+  // Wire ConfigManager listeners for hot-updatable fields
+  configManager.onChange((newConfig) => {
+    logger.info({ logLevel: newConfig.logLevel }, 'Config change detected, applying hot-updates');
+    // Hot-update log level
+    logger.level = newConfig.logLevel;
+  });
 
   // --- Trading components (guarded on privateKey) ---
 

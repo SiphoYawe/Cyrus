@@ -8,11 +8,20 @@ export abstract class RunnableBase {
   protected tickCount = 0;
   protected consecutiveErrors = 0;
   protected readonly logger: pino.Logger;
-  private readonly tickIntervalMs: number;
+  private tickIntervalMs: number;
 
   constructor(tickIntervalMs: number = 30_000, loggerName: string = 'runnable') {
     this.tickIntervalMs = tickIntervalMs;
     this.logger = createLogger(loggerName);
+  }
+
+  protected setTickInterval(ms: number): void {
+    this.tickIntervalMs = ms;
+    this.logger.info({ tickIntervalMs: ms }, 'Tick interval updated');
+  }
+
+  getTickIntervalMs(): number {
+    return this.tickIntervalMs;
   }
 
   async start(): Promise<void> {

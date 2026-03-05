@@ -23,6 +23,7 @@ export const WS_EVENT_TYPES = {
   CONFIRMATION_REQUEST: 'confirmation.request',
   RECOVERY_OPTIONS: 'recovery.options',
   STRATEGY_STATUS_UPDATED: 'strategy.status.updated',
+  CONFIG_UPDATED: 'config.updated',
 } as const;
 
 export type WsEventType = (typeof WS_EVENT_TYPES)[keyof typeof WS_EVENT_TYPES];

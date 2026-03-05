@@ -222,7 +222,7 @@ describe('AgentRestServer', () => {
     const res = await fetch(`http://127.0.0.1:${server.boundPort}/api/health`);
 
     expect(res.headers.get('access-control-allow-origin')).toBe('*');
-    expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, OPTIONS');
+    expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, PATCH, OPTIONS');
     expect(res.headers.get('access-control-allow-headers')).toBe('Content-Type');
   });
 

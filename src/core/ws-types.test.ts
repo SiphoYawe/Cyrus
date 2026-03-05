@@ -54,8 +54,8 @@ describe('ws-types', () => {
       expect(WS_EVENT_TYPES.COMMAND_ERROR).toBe('command.error');
     });
 
-    it('has 23 total event types', () => {
-      expect(Object.keys(WS_EVENT_TYPES)).toHaveLength(23);
+    it('has 24 total event types', () => {
+      expect(Object.keys(WS_EVENT_TYPES)).toHaveLength(24);
     });
 
     it('values are assignable to WsEventType', () => {
@@ -75,8 +75,8 @@ describe('ws-types', () => {
       expect(WS_COMMANDS.CONFIG_GET).toBe('config.get');
     });
 
-    it('has 6 total commands', () => {
-      expect(Object.keys(WS_COMMANDS)).toHaveLength(6);
+    it('has 7 total commands', () => {
+      expect(Object.keys(WS_COMMANDS)).toHaveLength(7);
     });
 
     it('values are assignable to WsCommandType', () => {

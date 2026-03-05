@@ -1,12 +1,13 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { Slider } from '@/components/ui/slider';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { useWebSocket } from '@/providers/ws-provider';
 import { useAgentStore } from '@/stores/agent-store';
+import { useConfig } from '@/hooks/use-config';
 import { WS_COMMANDS } from '@/types/ws';
 import { toast } from 'sonner';
 import { getRiskTierLabel } from './risk-allocations';
@@ -25,6 +26,9 @@ interface RiskDialProps {
 export function RiskDial({ className }: RiskDialProps) {
   const { send } = useWebSocket();
   const config = useAgentStore((s) => s.config);
+  const agentStatus = useAgentStore((s) => s.status);
+  const isOffline = agentStatus === 'unknown' || agentStatus === 'stopped';
+  const { updateConfig } = useConfig();
 
   const savedLevel = config?.riskLevel ?? 5;
 
@@ -35,6 +39,14 @@ export function RiskDial({ className }: RiskDialProps) {
 
   // Track last committed level to support Cancel
   const committedLevel = useRef<number>(savedLevel);
+
+  // Sync from config on mount
+  useEffect(() => {
+    if (config?.riskLevel) {
+      setCurrentSlider(config.riskLevel);
+      committedLevel.current = config.riskLevel;
+    }
+  }, [config?.riskLevel]);
 
   const isDirty = pendingLevel !== null && pendingLevel !== committedLevel.current;
   const displayLevel = pendingLevel ?? currentSlider;
@@ -50,18 +62,37 @@ export function RiskDial({ className }: RiskDialProps) {
     if (pendingLevel === null) return;
     setIsConfirming(true);
     try {
+      // Send real-time WS command for immediate rebalancing
       send({
         command: WS_COMMANDS.RISK_DIAL_CHANGE,
         payload: { level: pendingLevel },
       });
+
+      // Persist via PATCH for restart survival
+      await updateConfig({ riskLevel: pendingLevel });
+
       committedLevel.current = pendingLevel;
       setIsRebalancing(true);
       setPendingLevel(null);
-      toast.success(`Risk level updated to ${pendingLevel}. Rebalancing in progress.`);
+      toast.success(`Risk level updated to ${pendingLevel}. Rebalancing in progress.`, { duration: 4000 });
+    } catch (err) {
+      const prev = committedLevel.current;
+      setCurrentSlider(prev);
+      setPendingLevel(null);
+      const message = err instanceof Error ? err.message : 'Failed to update risk level';
+      toast.error(message, {
+        duration: Infinity,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            setPendingLevel(pendingLevel);
+          },
+        },
+      });
     } finally {
       setIsConfirming(false);
     }
-  }, [pendingLevel, send]);
+  }, [pendingLevel, send, updateConfig]);
 
   const handleCancel = useCallback(() => {
     const prev = committedLevel.current;
@@ -73,7 +104,10 @@ export function RiskDial({ className }: RiskDialProps) {
   const thumbPercent = ((displayLevel - 1) / 9) * 100;
 
   return (
-    <div className={cn('space-y-6', className)}>
+    <div
+      className={cn('space-y-6', className)}
+      title={isOffline ? 'Agent offline — settings are read-only' : undefined}
+    >
       {/* Header row */}
       <div className="flex items-center justify-between">
         <div className="space-y-0.5">
@@ -117,12 +151,15 @@ export function RiskDial({ className }: RiskDialProps) {
               step={1}
               value={[displayLevel]}
               onValueChange={handleSliderChange}
-              disabled={isRebalancing}
+              disabled={isRebalancing || isOffline}
               aria-label="Risk level"
               aria-valuenow={displayLevel}
               aria-valuemin={1}
               aria-valuemax={10}
-              className="[&_[data-slot=slider-track]]:bg-transparent [&_[data-slot=slider-range]]:bg-transparent"
+              className={cn(
+                '[&_[data-slot=slider-track]]:bg-transparent [&_[data-slot=slider-range]]:bg-transparent',
+                isOffline && 'opacity-50',
+              )}
             />
           </div>
         </div>
@@ -181,7 +218,7 @@ export function RiskDial({ className }: RiskDialProps) {
             variant="default"
             className="bg-violet-500 text-white hover:bg-violet-600 focus-visible:ring-violet-500"
             onClick={handleConfirm}
-            disabled={isConfirming}
+            disabled={isConfirming || isOffline}
             aria-label={`Confirm risk level change to ${pendingLevel}`}
           >
             {isConfirming ? (
