@@ -59,6 +59,20 @@ import type { CrossChainStrategy } from './strategies/cross-chain-strategy.js';
 // Types
 import type { RunnableBase } from './core/runnable-base.js';
 
+// OpenClaw gateway
+import { OpenClawPlugin } from './openclaw/plugin.js';
+import { createPortfolioTool } from './openclaw/tools/portfolio-tool.js';
+import { createPositionsTool } from './openclaw/tools/positions-tool.js';
+import { createStrategiesTool } from './openclaw/tools/strategies-tool.js';
+import { createSwapTool } from './openclaw/tools/swap-tool.js';
+import { createBridgeTool } from './openclaw/tools/bridge-tool.js';
+import { createYieldTool } from './openclaw/tools/yield-tool.js';
+import { createRiskDialTool } from './openclaw/tools/risk-dial-tool.js';
+import { createHeartbeatTool } from './openclaw/tools/heartbeat-tool.js';
+import { createReportTool } from './openclaw/tools/report-tool.js';
+import { createTradePreviewTool } from './openclaw/tools/trade-preview-tool.js';
+import { createTradeApproveTool } from './openclaw/tools/trade-approve-tool.js';
+
 const logger = createLogger('main');
 
 const ARBITRUM_CHAIN_ID = 42161;
@@ -99,7 +113,22 @@ async function main(): Promise<void> {
     executorOrchestrator: orchestrator,
   });
 
-  // 5. REST server (ConfigManager wired later after wsServer is created)
+  // 5. OpenClaw plugin — register all 11 tools for gateway integration
+  const openClawPlugin = new OpenClawPlugin({ store, config, persistence, agent });
+  openClawPlugin.registerTool(createPortfolioTool(openClawPlugin));
+  openClawPlugin.registerTool(createPositionsTool(openClawPlugin));
+  openClawPlugin.registerTool(createStrategiesTool(openClawPlugin));
+  openClawPlugin.registerTool(createSwapTool(openClawPlugin));
+  openClawPlugin.registerTool(createBridgeTool(openClawPlugin));
+  openClawPlugin.registerTool(createYieldTool(openClawPlugin));
+  openClawPlugin.registerTool(createRiskDialTool(openClawPlugin));
+  openClawPlugin.registerTool(createHeartbeatTool(openClawPlugin));
+  openClawPlugin.registerTool(createReportTool(openClawPlugin));
+  openClawPlugin.registerTool(createTradePreviewTool(openClawPlugin));
+  openClawPlugin.registerTool(createTradeApproveTool(openClawPlugin));
+  logger.info({ toolCount: openClawPlugin.getTools().length }, 'OpenClaw plugin initialized');
+
+  // 6. REST server (ConfigManager wired later after wsServer is created)
   const restServer = new AgentRestServer({
     port: config.rest.port,
     corsOrigin: config.rest.corsOrigin,
@@ -108,6 +137,7 @@ async function main(): Promise<void> {
     config,
     configManager,
     agent,
+    openClawPlugin,
   });
 
   await restServer.start();
