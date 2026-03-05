@@ -35,6 +35,7 @@ describe('AgentRestServer', () => {
       store: deps.store,
       persistence: deps.persistence,
       config: deps.config,
+      agent: { getTickCount: () => 0, isRunning: () => true },
     });
 
     await server.start();
@@ -178,7 +179,7 @@ describe('AgentRestServer', () => {
 
     expect(status).toBe(200);
     expect(body.ok).toBe(true);
-    expect(body.data.strategies).toEqual([]);
+    expect(body.data).toEqual([]);
   });
 
   // --- Config ---

@@ -264,59 +264,274 @@ export class MarketDataService {
   // --- Data source abstractions (mockable in tests) ---
 
   async fetchOrderBook(market: string): Promise<MarketOrderBook> {
-    // Stub: in production, routes to Hyperliquid for perp or LI.FI for spot
-    const bids: MarketOrderBookLevel[] = [];
-    const asks: MarketOrderBookLevel[] = [];
-    return {
-      market,
-      bids,
-      asks,
-      spread: 0,
-      spreadPercent: 0,
-      midPrice: 0,
-      timestamp: Date.now(),
-    };
+    try {
+      const response = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'l2Book', coin: market, nSigFigs: 5 }),
+      });
+
+      if (!response.ok) {
+        logger.warn({ market, status: response.status }, 'Hyperliquid order book fetch failed');
+        return { market, bids: [], asks: [], spread: 0, spreadPercent: 0, midPrice: 0, timestamp: Date.now() };
+      }
+
+      const data = (await response.json()) as {
+        levels: [
+          { px: string; sz: string; n: number }[],
+          { px: string; sz: string; n: number }[],
+        ];
+      };
+
+      const [bidLevels, askLevels] = data.levels;
+
+      const mapLevel = (l: { px: string; sz: string }): MarketOrderBookLevel => {
+        const price = parseFloat(l.px);
+        const size = parseFloat(l.sz);
+        return { price, size, sizeUsd: price * size };
+      };
+
+      const bids = (bidLevels ?? []).slice(0, 20).map(mapLevel);
+      const asks = (askLevels ?? []).slice(0, 20).map(mapLevel);
+
+      const bestBid = bids[0]?.price ?? 0;
+      const bestAsk = asks[0]?.price ?? 0;
+      const midPrice = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : 0;
+      const spread = bestAsk - bestBid;
+      const spreadPercent = midPrice > 0 ? (spread / midPrice) * 100 : 0;
+
+      return { market, bids, asks, spread, spreadPercent, midPrice, timestamp: Date.now() };
+    } catch (err) {
+      logger.warn({ market, error: (err as Error).message }, 'Order book fetch error');
+      return { market, bids: [], asks: [], spread: 0, spreadPercent: 0, midPrice: 0, timestamp: Date.now() };
+    }
   }
 
   async fetchVolume(token: TokenAddress, chain: ChainId, period: string): Promise<VolumeMetrics> {
-    // Stub: in production, fetches from DEX subgraphs
-    return {
-      token, chain, period,
-      totalVolume: 0, buyVolume: 0, sellVolume: 0,
-      buySellRatio: 1, volumeVs7dAvg: 1, vwap: 0,
-      timestamp: Date.now(),
+    const chainNames: Record<number, string> = {
+      1: 'ethereum', 10: 'optimism', 56: 'bsc', 137: 'polygon',
+      8453: 'base', 42161: 'arbitrum',
     };
+    const chainSlug = chainNames[chain as number];
+
+    if (!chainSlug) {
+      return { token, chain, period, totalVolume: 0, buyVolume: 0, sellVolume: 0, buySellRatio: 1, volumeVs7dAvg: 1, vwap: 0, timestamp: Date.now() };
+    }
+
+    try {
+      const response = await fetch(`https://api.llama.fi/overview/dexs/${chainSlug}?excludeTotalDataChart=true&excludeTotalDataChartBreakdown=true`);
+      if (!response.ok) {
+        return { token, chain, period, totalVolume: 0, buyVolume: 0, sellVolume: 0, buySellRatio: 1, volumeVs7dAvg: 1, vwap: 0, timestamp: Date.now() };
+      }
+
+      const data = (await response.json()) as {
+        totalVolume24h?: number;
+        change_7dover7d?: number;
+        total24h?: number;
+        total7d?: number;
+      };
+
+      const totalVolume = data.total24h ?? data.totalVolume24h ?? 0;
+      const total7d = data.total7d ?? totalVolume * 7;
+      const avg7d = total7d / 7;
+      const volumeVs7dAvg = avg7d > 0 ? totalVolume / avg7d : 1;
+
+      // Approximate buy/sell split (DeFiLlama doesn't provide directional data)
+      // Use change metric as a proxy: positive change = more buying pressure
+      const changeRatio = data.change_7dover7d ?? 0;
+      const buyBias = 0.5 + Math.max(-0.15, Math.min(0.15, changeRatio / 200));
+      const buyVolume = totalVolume * buyBias;
+      const sellVolume = totalVolume * (1 - buyBias);
+      const buySellRatio = sellVolume > 0 ? buyVolume / sellVolume : 1;
+
+      return {
+        token, chain, period,
+        totalVolume, buyVolume, sellVolume,
+        buySellRatio, volumeVs7dAvg,
+        vwap: 0, // VWAP not available from aggregate endpoint
+        timestamp: Date.now(),
+      };
+    } catch (err) {
+      logger.warn({ chain: chain as number, error: (err as Error).message }, 'Volume fetch error');
+      return { token, chain, period, totalVolume: 0, buyVolume: 0, sellVolume: 0, buySellRatio: 1, volumeVs7dAvg: 1, vwap: 0, timestamp: Date.now() };
+    }
   }
 
   async fetchVolatility(token: TokenAddress, period: string): Promise<VolatilityMetrics> {
-    // Stub: in production, computes from historical candles
+    // Compute from historical prices stored in the historicalPrices map
+    const prices: number[] = [];
+
+    for (const [key, timeSeries] of this.historicalPrices) {
+      if (key.endsWith(`-${token as string}`)) {
+        const sorted = [...timeSeries.entries()].sort((a, b) => a[0] - b[0]);
+        for (const [, price] of sorted) {
+          if (price > 0) prices.push(price);
+        }
+        break;
+      }
+    }
+
+    // If no historical data, try to pull current price from cache
+    if (prices.length === 0) {
+      for (const [key, timeSeries] of this.historicalPrices) {
+        if (key.includes(token as string)) {
+          const sorted = [...timeSeries.entries()].sort((a, b) => a[0] - b[0]);
+          for (const [, price] of sorted) {
+            if (price > 0) prices.push(price);
+          }
+          break;
+        }
+      }
+    }
+
+    if (prices.length < 2) {
+      return { token, period, realizedVolatility: 0, atr: 0, bollingerWidth: 0, bollingerUpper: 0, bollingerLower: 0, bollingerMiddle: 0, timestamp: Date.now() };
+    }
+
+    // Realized volatility: std dev of log returns, annualized
+    const logReturns: number[] = [];
+    for (let i = 1; i < prices.length; i++) {
+      if (prices[i]! > 0 && prices[i - 1]! > 0) {
+        logReturns.push(Math.log(prices[i]! / prices[i - 1]!));
+      }
+    }
+
+    let realizedVolatility = 0;
+    if (logReturns.length > 1) {
+      const mean = logReturns.reduce((s, v) => s + v, 0) / logReturns.length;
+      const variance = logReturns.reduce((s, v) => s + (v - mean) ** 2, 0) / (logReturns.length - 1);
+      realizedVolatility = Math.sqrt(variance) * Math.sqrt(365); // Annualized
+    }
+
+    // ATR approximation: average of absolute price changes
+    let atrSum = 0;
+    const atrPeriod = Math.min(14, prices.length - 1);
+    for (let i = prices.length - atrPeriod; i < prices.length; i++) {
+      atrSum += Math.abs(prices[i]! - prices[i - 1]!);
+    }
+    const atr = atrPeriod > 0 ? atrSum / atrPeriod : 0;
+
+    // Bollinger Bands (20-period SMA +/- 2 std devs)
+    const bbPeriod = Math.min(20, prices.length);
+    const bbSlice = prices.slice(-bbPeriod);
+    const bollingerMiddle = bbSlice.reduce((s, v) => s + v, 0) / bbSlice.length;
+    const bbVariance = bbSlice.reduce((s, v) => s + (v - bollingerMiddle) ** 2, 0) / bbSlice.length;
+    const bbStdDev = Math.sqrt(bbVariance);
+    const bollingerUpper = bollingerMiddle + 2 * bbStdDev;
+    const bollingerLower = bollingerMiddle - 2 * bbStdDev;
+    const bollingerWidth = bollingerMiddle > 0 ? (bollingerUpper - bollingerLower) / bollingerMiddle : 0;
+
     return {
       token, period,
-      realizedVolatility: 0, atr: 0,
-      bollingerWidth: 0, bollingerUpper: 0, bollingerLower: 0, bollingerMiddle: 0,
+      realizedVolatility, atr,
+      bollingerWidth, bollingerUpper, bollingerLower, bollingerMiddle,
       timestamp: Date.now(),
     };
   }
 
   async fetchFundingRate(market: string): Promise<FundingRateData> {
-    // Stub: in production, fetches from Hyperliquid
-    return {
-      market,
-      currentRate: 0, predictedNextRate: 0, avg7d: 0, annualizedYield: 0,
-      nextFundingTime: Date.now() + 8 * 3600_000,
-      timestamp: Date.now(),
-    };
+    try {
+      const response = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
+      });
+
+      if (!response.ok) {
+        return { market, currentRate: 0, predictedNextRate: 0, avg7d: 0, annualizedYield: 0, nextFundingTime: Date.now() + 8 * 3600_000, timestamp: Date.now() };
+      }
+
+      const data = (await response.json()) as [
+        { universe: { name: string }[] },
+        { funding: string; premium: string; openInterest: string; prevDayPx: string; markPx: string }[],
+      ];
+
+      const [meta, assetCtxs] = data;
+      const index = meta.universe.findIndex((u) => u.name === market);
+      if (index === -1 || !assetCtxs[index]) {
+        return { market, currentRate: 0, predictedNextRate: 0, avg7d: 0, annualizedYield: 0, nextFundingTime: Date.now() + 8 * 3600_000, timestamp: Date.now() };
+      }
+
+      const ctx = assetCtxs[index]!;
+      const currentRate = parseFloat(ctx.funding);
+      const premium = parseFloat(ctx.premium);
+
+      // Funding settles every 8 hours on Hyperliquid
+      // predicted next rate ≈ current premium clamped
+      const predictedNextRate = Math.max(-0.01, Math.min(0.01, premium));
+
+      // Annualized yield: 3 funding periods/day × 365 days
+      const annualizedYield = currentRate * 3 * 365;
+
+      // Next funding time: round up to next 8-hour boundary (UTC 0:00, 8:00, 16:00)
+      const now = Date.now();
+      const hourOfDay = new Date(now).getUTCHours();
+      const nextFundingHour = Math.ceil(hourOfDay / 8) * 8;
+      const nextFundingDate = new Date(now);
+      nextFundingDate.setUTCHours(nextFundingHour >= 24 ? 0 : nextFundingHour, 0, 0, 0);
+      if (nextFundingDate.getTime() <= now) {
+        nextFundingDate.setUTCHours(nextFundingDate.getUTCHours() + 8);
+      }
+
+      return {
+        market, currentRate, predictedNextRate,
+        avg7d: currentRate, // Approximation: use current as avg (historical data would require separate calls)
+        annualizedYield,
+        nextFundingTime: nextFundingDate.getTime(),
+        timestamp: Date.now(),
+      };
+    } catch (err) {
+      logger.warn({ market, error: (err as Error).message }, 'Funding rate fetch error');
+      return { market, currentRate: 0, predictedNextRate: 0, avg7d: 0, annualizedYield: 0, nextFundingTime: Date.now() + 8 * 3600_000, timestamp: Date.now() };
+    }
   }
 
   async fetchOpenInterest(market: string): Promise<OpenInterestData> {
-    // Stub: in production, fetches from Hyperliquid
-    return {
-      market,
-      totalOi: 0, totalOiUsd: 0,
-      longRatio: 0.5, shortRatio: 0.5,
-      change24h: 0, change24hPercent: 0,
-      timestamp: Date.now(),
-    };
+    try {
+      const response = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
+      });
+
+      if (!response.ok) {
+        return { market, totalOi: 0, totalOiUsd: 0, longRatio: 0.5, shortRatio: 0.5, change24h: 0, change24hPercent: 0, timestamp: Date.now() };
+      }
+
+      const data = (await response.json()) as [
+        { universe: { name: string }[] },
+        { funding: string; openInterest: string; prevDayPx: string; markPx: string }[],
+      ];
+
+      const [meta, assetCtxs] = data;
+      const index = meta.universe.findIndex((u) => u.name === market);
+      if (index === -1 || !assetCtxs[index]) {
+        return { market, totalOi: 0, totalOiUsd: 0, longRatio: 0.5, shortRatio: 0.5, change24h: 0, change24hPercent: 0, timestamp: Date.now() };
+      }
+
+      const ctx = assetCtxs[index]!;
+      const totalOi = parseFloat(ctx.openInterest); // In base asset units
+      const markPx = parseFloat(ctx.markPx);
+      const totalOiUsd = totalOi * markPx;
+
+      // Hyperliquid doesn't expose long/short breakdown in public API
+      // Use funding rate sign as directional proxy
+      const fundingRate = parseFloat(ctx.funding);
+      // Positive funding = longs pay shorts = more longs
+      const longBias = 0.5 + Math.max(-0.15, Math.min(0.15, fundingRate * 100));
+      const longRatio = longBias;
+      const shortRatio = 1 - longBias;
+
+      return {
+        market, totalOi, totalOiUsd,
+        longRatio, shortRatio,
+        change24h: 0, change24hPercent: 0, // Would need historical snapshots
+        timestamp: Date.now(),
+      };
+    } catch (err) {
+      logger.warn({ market, error: (err as Error).message }, 'Open interest fetch error');
+      return { market, totalOi: 0, totalOiUsd: 0, longRatio: 0.5, shortRatio: 0.5, change24h: 0, change24hPercent: 0, timestamp: Date.now() };
+    }
   }
 
   // --- Computation methods ---

@@ -89,21 +89,35 @@ export function useActivity(filters: ActivityFilters = {}): UseActivityResult {
         throw new Error(`Activity fetch failed: ${res.status}`);
       }
 
-      const json = (await res.json()) as {
-        reports: ActivityReport[];
+      const raw = (await res.json()) as {
+        ok?: boolean;
+        data?: {
+          activities?: ActivityReport[];
+          reports?: ActivityReport[];
+          pagination?: { hasMore: boolean; total: number };
+          stats?: ActivityStats;
+          hasMore?: boolean;
+        };
+        reports?: ActivityReport[];
         stats?: ActivityStats;
-        hasMore: boolean;
+        hasMore?: boolean;
       };
 
-      const incoming = json.reports ?? [];
+      // Unwrap response envelope if present
+      const payload = raw.ok && raw.data ? raw.data : raw;
+      const incoming = (payload as { activities?: ActivityReport[]; reports?: ActivityReport[] }).activities
+        ?? (payload as { reports?: ActivityReport[] }).reports
+        ?? [];
 
       setReports((prev) => {
         const next = reset ? incoming : [...prev, ...incoming];
-        setStats(json.stats ?? deriveStats(next));
+        setStats((payload as { stats?: ActivityStats }).stats ?? deriveStats(next));
         return next;
       });
 
-      setHasMore(json.hasMore ?? incoming.length === PAGE_SIZE);
+      const paginationHasMore = (payload as { pagination?: { hasMore: boolean } }).pagination?.hasMore
+        ?? (payload as { hasMore?: boolean }).hasMore;
+      setHasMore(paginationHasMore ?? incoming.length === PAGE_SIZE);
       setError(null);
       offsetRef.current += incoming.length;
     } catch (err) {

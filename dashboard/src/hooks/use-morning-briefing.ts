@@ -44,7 +44,8 @@ export function useMorningBriefing(): UseMorningBriefingResult {
         throw new Error(`Briefing fetch failed: ${res.status}`);
       }
 
-      const json = await res.json() as MorningBriefing;
+      const raw = await res.json() as { ok?: boolean; data?: MorningBriefing };
+      const json = raw.ok && raw.data ? raw.data : (raw as unknown as MorningBriefing);
       setData(json);
       setError(null);
     } catch (err) {

@@ -23,8 +23,6 @@ export class CyrusAgent extends RunnableBase {
   }
 
   async controlTask(): Promise<void> {
-    // Strategy evaluation will be added in Epic 2.
-    // For now, just process any queued actions.
     if (!this.actionQueue.isEmpty()) {
       this.logger.info(
         { queueSize: this.actionQueue.size(), tick: this.tickCount },

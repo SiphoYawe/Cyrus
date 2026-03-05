@@ -48,8 +48,9 @@ export function usePortfolioHistory(): UsePortfolioHistoryResult {
         throw new Error(`History fetch failed: ${res.status}`);
       }
 
-      const json = await res.json() as PortfolioDataPoint[];
-      setData(json);
+      const raw = await res.json() as { ok?: boolean; data?: PortfolioDataPoint[] };
+      const json = raw.ok && raw.data ? raw.data : (raw as unknown as PortfolioDataPoint[]);
+      setData(Array.isArray(json) ? json : []);
       setError(null);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return;

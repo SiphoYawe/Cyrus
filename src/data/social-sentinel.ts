@@ -1,6 +1,7 @@
 // Social Sentinel — alpha extraction from social/governance feeds (Story 7.3)
 
 import { EventEmitter } from 'node:events';
+import Anthropic from '@anthropic-ai/sdk';
 import { RunnableBase } from '../core/runnable-base.js';
 import {
   URGENCY_ORDINAL,
@@ -22,10 +23,19 @@ export class SocialSentinel extends RunnableBase {
   private readonly tokenIndex = new Map<string, SocialSignal[]>();
   private readonly mentionCounts = new Map<string, number[]>(); // token -> timestamps
   private signalCounter = 0;
+  private anthropic: Anthropic | null = null;
+  private sentimentCallCount = 0;
+  private sentimentCallResetTime = 0;
 
   constructor(config: Partial<SocialSentinelConfig> = {}) {
     super(60_000, 'social-sentinel');
     this.config = { ...DEFAULT_SOCIAL_SENTINEL_CONFIG, ...config };
+
+    // Initialize Anthropic client if API key is available
+    const apiKey = process.env['ANTHROPIC_API_KEY'];
+    if (apiKey) {
+      this.anthropic = new Anthropic({ apiKey });
+    }
   }
 
   private nextSignalId(): string {
@@ -135,34 +145,348 @@ export class SocialSentinel extends RunnableBase {
     return this.signals.size;
   }
 
-  // --- Data source stubs (mockable in tests) ---
+  // --- Data source implementations ---
 
   async pollTwitter(): Promise<RawSocialData[]> {
-    // Stub: in production, fetches from Twitter API for configured influencers
-    return [];
+    // Twitter/X API v2 search for crypto-related content from influencers
+    const bearerToken = process.env['TWITTER_BEARER_TOKEN'];
+    if (!bearerToken || this.config.twitterInfluencers.length === 0) return [];
+
+    try {
+      // Search for recent tweets from configured influencers mentioning crypto tokens
+      const influencerQuery = this.config.twitterInfluencers
+        .slice(0, 5) // Limit to 5 to stay within query length
+        .map((handle) => `from:${handle}`)
+        .join(' OR ');
+
+      const query = `(${influencerQuery}) (crypto OR $BTC OR $ETH OR $SOL OR DeFi OR airdrop OR yield)`;
+      const url = `https://api.twitter.com/2/tweets/search/recent?query=${encodeURIComponent(query)}&max_results=10&tweet.fields=author_id,created_at,public_metrics`;
+
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${bearerToken}` },
+      });
+
+      if (!response.ok) {
+        this.logger.warn({ status: response.status }, 'Twitter API error');
+        return [];
+      }
+
+      const data = (await response.json()) as {
+        data?: Array<{
+          id: string;
+          text: string;
+          author_id: string;
+          created_at: string;
+          public_metrics: { like_count: number; retweet_count: number; reply_count: number; impression_count: number };
+        }>;
+      };
+
+      return (data.data ?? []).map((tweet) => ({
+        source: 'twitter' as const,
+        text: tweet.text,
+        author: tweet.author_id,
+        authorFollowers: null,
+        engagementMetrics: {
+          likes: tweet.public_metrics.like_count,
+          retweets: tweet.public_metrics.retweet_count,
+          replies: tweet.public_metrics.reply_count,
+          impressions: tweet.public_metrics.impression_count,
+        },
+        timestamp: new Date(tweet.created_at).getTime(),
+        rawPayload: tweet,
+      }));
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Twitter poll error');
+      return [];
+    }
   }
 
   async pollDiscord(): Promise<RawSocialData[]> {
-    // Stub: in production, fetches from Discord channels
-    return [];
+    // Discord REST API for channel messages
+    const botToken = process.env['DISCORD_BOT_TOKEN'];
+    if (!botToken || this.config.discordChannels.length === 0) return [];
+
+    const results: RawSocialData[] = [];
+
+    for (const channelId of this.config.discordChannels.slice(0, 3)) {
+      try {
+        const response = await fetch(
+          `https://discord.com/api/v10/channels/${channelId}/messages?limit=10`,
+          { headers: { Authorization: `Bot ${botToken}` } },
+        );
+
+        if (!response.ok) continue;
+
+        const messages = (await response.json()) as Array<{
+          id: string;
+          content: string;
+          author: { username: string; id: string };
+          timestamp: string;
+          reactions?: Array<{ count: number }>;
+        }>;
+
+        for (const msg of messages) {
+          // Only process messages that mention tokens
+          if (!this.extractTokenMention(msg.content)) continue;
+
+          const totalReactions = (msg.reactions ?? []).reduce((s, r) => s + r.count, 0);
+
+          results.push({
+            source: 'discord',
+            text: msg.content,
+            author: msg.author.username,
+            authorFollowers: null,
+            engagementMetrics: {
+              likes: totalReactions,
+              retweets: 0,
+              replies: 0,
+              impressions: null,
+            },
+            timestamp: new Date(msg.timestamp).getTime(),
+            rawPayload: msg,
+          });
+        }
+      } catch (err) {
+        this.logger.debug({ channelId, error: (err as Error).message }, 'Discord channel poll error');
+      }
+    }
+
+    return results;
   }
 
   async pollTelegram(): Promise<RawSocialData[]> {
-    // Stub: in production, fetches from Telegram channels
-    return [];
+    // Telegram Bot API for channel messages
+    const botToken = process.env['TELEGRAM_BOT_TOKEN'];
+    if (!botToken || this.config.telegramChannels.length === 0) return [];
+
+    const results: RawSocialData[] = [];
+
+    for (const channel of this.config.telegramChannels.slice(0, 3)) {
+      try {
+        // Use getUpdates or channel history
+        const response = await fetch(
+          `https://api.telegram.org/bot${botToken}/getUpdates?offset=-10&limit=10&allowed_updates=["channel_post"]`,
+        );
+
+        if (!response.ok) continue;
+
+        const data = (await response.json()) as {
+          ok: boolean;
+          result: Array<{
+            channel_post?: {
+              text?: string;
+              chat: { title: string; username?: string };
+              date: number;
+              forward_from_chat?: { title: string };
+            };
+          }>;
+        };
+
+        if (!data.ok) continue;
+
+        for (const update of data.result) {
+          const post = update.channel_post;
+          if (!post?.text) continue;
+
+          // Filter for relevant channel
+          if (post.chat.username !== channel && post.chat.title !== channel) continue;
+
+          results.push({
+            source: 'telegram',
+            text: post.text,
+            author: post.chat.title,
+            authorFollowers: null,
+            engagementMetrics: null,
+            timestamp: post.date * 1000,
+            rawPayload: post,
+          });
+        }
+      } catch (err) {
+        this.logger.debug({ channel, error: (err as Error).message }, 'Telegram channel poll error');
+      }
+    }
+
+    return results;
   }
 
   async pollGovernance(): Promise<RawSocialData[]> {
-    // Stub: in production, fetches from governance forums
-    return [];
+    // Snapshot GraphQL API for governance proposals
+    if (this.config.governanceProtocols.length === 0) return [];
+
+    const results: RawSocialData[] = [];
+
+    try {
+      const spaces = this.config.governanceProtocols.slice(0, 5).map((p) => `"${p}.eth"`).join(', ');
+      const query = `{
+        proposals(
+          first: 10,
+          skip: 0,
+          where: { space_in: [${spaces}], state: "active" },
+          orderBy: "created",
+          orderDirection: desc
+        ) {
+          id
+          title
+          body
+          space { id name }
+          author
+          created
+          scores_total
+          votes
+          state
+        }
+      }`;
+
+      const response = await fetch('https://hub.snapshot.org/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query }),
+      });
+
+      if (!response.ok) return [];
+
+      const data = (await response.json()) as {
+        data: {
+          proposals: Array<{
+            id: string;
+            title: string;
+            body: string;
+            space: { id: string; name: string };
+            author: string;
+            created: number;
+            scores_total: number;
+            votes: number;
+            state: string;
+          }>;
+        };
+      };
+
+      for (const proposal of data.data?.proposals ?? []) {
+        const text = `[Governance] ${proposal.space.name}: ${proposal.title}\n${proposal.body.slice(0, 500)}`;
+
+        results.push({
+          source: 'governance',
+          text,
+          author: proposal.space.name,
+          authorFollowers: null,
+          engagementMetrics: {
+            likes: proposal.votes,
+            retweets: 0,
+            replies: 0,
+            impressions: null,
+          },
+          timestamp: proposal.created * 1000,
+          rawPayload: proposal,
+        });
+      }
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Governance poll error');
+    }
+
+    return results;
   }
 
   // --- Sentiment analysis ---
 
   async analyzeSentiment(raw: RawSocialData): Promise<SocialSignal> {
-    // Stub: in production, calls Claude API for NLP analysis
-    // Extracts token, classifies sentiment, assesses urgency
     const token = this.extractTokenMention(raw.text);
+
+    // Use Claude API for real sentiment analysis if available
+    if (this.anthropic) {
+      // Rate limit: check calls per minute
+      const now = Date.now();
+      if (now - this.sentimentCallResetTime > 60_000) {
+        this.sentimentCallCount = 0;
+        this.sentimentCallResetTime = now;
+      }
+
+      if (this.sentimentCallCount < this.config.claudeRateLimitPerMin) {
+        this.sentimentCallCount++;
+
+        try {
+          const response = await this.anthropic.messages.create({
+            model: this.config.claudeModel,
+            max_tokens: 256,
+            system: `You are a crypto market sentiment analyzer. Analyze the following social media post and respond with ONLY a JSON object containing:
+- "sentiment": number between -1.0 (very bearish) and 1.0 (very bullish)
+- "urgency": one of "low", "medium", "high", "critical"
+- "token": the primary token/coin mentioned (symbol only, e.g. "ETH"), or null
+- "reasoning": a one-sentence explanation
+
+Example: {"sentiment": 0.7, "urgency": "medium", "token": "ETH", "reasoning": "Bullish outlook on Ethereum merge benefits"}`,
+            messages: [{
+              role: 'user',
+              content: `Source: ${raw.source}\nAuthor: ${raw.author}\nText: ${raw.text.slice(0, 500)}`,
+            }],
+          });
+
+          const text = response.content
+            .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+            .map((block) => block.text)
+            .join('');
+
+          // Parse JSON response
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]) as {
+              sentiment: number;
+              urgency: string;
+              token: string | null;
+              reasoning: string;
+            };
+
+            const sentimentScore = Math.max(-1, Math.min(1, parsed.sentiment));
+            const validUrgencies = ['low', 'medium', 'high', 'critical'];
+            const urgency = (validUrgencies.includes(parsed.urgency) ? parsed.urgency : 'low') as SocialUrgency;
+
+            return {
+              id: this.nextSignalId(),
+              source: raw.source,
+              token: parsed.token ?? token,
+              tokenAddress: null,
+              chainId: null,
+              sentimentScore,
+              urgency,
+              context: {
+                text: raw.text,
+                author: raw.author,
+                authorFollowers: raw.authorFollowers,
+                engagementMetrics: raw.engagementMetrics,
+                proposalId: null,
+                channelName: null,
+              },
+              timestamp: raw.timestamp,
+              consolidated: false,
+              constituentIds: [],
+            };
+          }
+        } catch (err) {
+          this.logger.debug({ error: (err as Error).message }, 'Claude sentiment analysis failed, using fallback');
+        }
+      }
+    }
+
+    // Fallback: basic keyword-based sentiment
+    const text = raw.text.toLowerCase();
+    const bullishWords = ['bullish', 'moon', 'pump', 'buy', 'long', 'breakout', 'ath', 'rally', 'surge'];
+    const bearishWords = ['bearish', 'dump', 'sell', 'short', 'crash', 'rug', 'scam', 'drop', 'plunge'];
+
+    let sentimentScore = 0;
+    for (const word of bullishWords) {
+      if (text.includes(word)) sentimentScore += 0.15;
+    }
+    for (const word of bearishWords) {
+      if (text.includes(word)) sentimentScore -= 0.15;
+    }
+    sentimentScore = Math.max(-1, Math.min(1, sentimentScore));
+
+    // Urgency from engagement
+    let urgency: SocialUrgency = 'low';
+    if (raw.engagementMetrics) {
+      const total = raw.engagementMetrics.likes + raw.engagementMetrics.retweets + raw.engagementMetrics.replies;
+      if (total >= this.config.viralEngagementThreshold) urgency = 'high';
+      else if (total >= this.config.viralEngagementThreshold / 3) urgency = 'medium';
+    }
 
     return {
       id: this.nextSignalId(),
@@ -170,8 +494,8 @@ export class SocialSentinel extends RunnableBase {
       token,
       tokenAddress: null,
       chainId: null,
-      sentimentScore: 0,
-      urgency: 'low',
+      sentimentScore,
+      urgency,
       context: {
         text: raw.text,
         author: raw.author,

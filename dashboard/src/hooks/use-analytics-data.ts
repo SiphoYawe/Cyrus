@@ -77,109 +77,6 @@ export interface UseAnalyticsDataResult {
   setSelectedSymbol: (symbol: string) => void;
 }
 
-// ── Default / fallback data ──────────────────────────────────────────
-
-function generateFallbackCandles(): CandlestickDataPoint[] {
-  const candles: CandlestickDataPoint[] = [];
-  let price = 3000;
-  const now = new Date();
-
-  for (let i = 89; i >= 0; i--) {
-    const date = new Date(now);
-    date.setDate(date.getDate() - i);
-    const dateStr = date.toISOString().split('T')[0];
-
-    const change = (Math.random() - 0.48) * 100;
-    const open = price;
-    const close = price + change;
-    const high = Math.max(open, close) + Math.random() * 50;
-    const low = Math.min(open, close) - Math.random() * 50;
-
-    candles.push({
-      time: dateStr,
-      open: Math.round(open * 100) / 100,
-      high: Math.round(high * 100) / 100,
-      low: Math.round(low * 100) / 100,
-      close: Math.round(close * 100) / 100,
-      volume: Math.round(Math.random() * 1000000),
-    });
-
-    price = close;
-  }
-
-  return candles;
-}
-
-function generateFallbackMarkers(candles: CandlestickDataPoint[]): TradeMarker[] {
-  const markers: TradeMarker[] = [];
-  const entryIndices = [10, 25, 45, 60, 75];
-
-  for (const idx of entryIndices) {
-    if (idx < candles.length) {
-      const isBuy = Math.random() > 0.4;
-      markers.push({
-        time: candles[idx].time,
-        position: isBuy ? 'belowBar' : 'aboveBar',
-        color: isBuy ? '#22C55E' : '#EF4444',
-        shape: isBuy ? 'arrowUp' : 'arrowDown',
-        text: isBuy ? 'BUY' : 'SELL',
-      });
-    }
-  }
-
-  return markers;
-}
-
-const FALLBACK_ALLOCATIONS: AllocationNode[] = [
-  { name: 'Ethereum', symbol: 'ETH', value: 45000, change24h: 2.3 },
-  { name: 'Bitcoin', symbol: 'BTC', value: 30000, change24h: -0.8 },
-  { name: 'Arbitrum', symbol: 'ARB', value: 12000, change24h: 5.1 },
-  { name: 'Optimism', symbol: 'OP', value: 8000, change24h: -1.2 },
-  { name: 'Polygon', symbol: 'MATIC', value: 5000, change24h: 3.7 },
-  { name: 'Chainlink', symbol: 'LINK', value: 4000, change24h: -2.5 },
-  { name: 'Aave', symbol: 'AAVE', value: 3500, change24h: 1.8 },
-  { name: 'Uniswap', symbol: 'UNI', value: 2500, change24h: -0.3 },
-];
-
-const FALLBACK_CORRELATION: CorrelationData = {
-  assets: ['ETH', 'BTC', 'ARB', 'OP', 'MATIC', 'LINK'],
-  matrix: [
-    [1.0, 0.85, 0.72, 0.68, 0.61, 0.55],
-    [0.85, 1.0, 0.65, 0.58, 0.52, 0.48],
-    [0.72, 0.65, 1.0, 0.78, 0.45, 0.42],
-    [0.68, 0.58, 0.78, 1.0, 0.41, 0.38],
-    [0.61, 0.52, 0.45, 0.41, 1.0, 0.55],
-    [0.55, 0.48, 0.42, 0.38, 0.55, 1.0],
-  ],
-};
-
-const FALLBACK_RISK_METRICS: RiskMetrics = {
-  sharpeRatio: 1.85,
-  sortinoRatio: 2.42,
-  maxDrawdown: 0.127,
-  var95: 2340,
-  var99: 4120,
-  annualizedReturn: 0.342,
-  annualizedVolatility: 0.185,
-  calmarRatio: 2.69,
-  winRate: 0.63,
-  profitFactor: 1.72,
-};
-
-function buildFallbackData(symbol: string): AnalyticsData {
-  const candles = generateFallbackCandles();
-  return {
-    priceHistory: {
-      symbol,
-      candles,
-      markers: generateFallbackMarkers(candles),
-    },
-    allocations: FALLBACK_ALLOCATIONS,
-    correlation: FALLBACK_CORRELATION,
-    riskMetrics: FALLBACK_RISK_METRICS,
-  };
-}
-
 // ── Hook ──────────────────────────────────────────────────────────
 
 export function useAnalyticsData(): UseAnalyticsDataResult {
@@ -210,14 +107,13 @@ export function useAnalyticsData(): UseAnalyticsDataResult {
         throw new Error(`Analytics fetch failed: ${res.status}`);
       }
 
-      const json = (await res.json()) as AnalyticsData;
+      const raw = (await res.json()) as { ok?: boolean; data?: AnalyticsData };
+      const json = raw.ok && raw.data ? raw.data : (raw as unknown as AnalyticsData);
       errorRef.current = null;
       setData(json);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return;
       errorRef.current = err instanceof Error ? err : new Error(String(err));
-      // Fall back to generated data when API is unavailable
-      setData(buildFallbackData(symbol));
     } finally {
       setIsLoading(false);
     }

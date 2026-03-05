@@ -12,6 +12,7 @@ function createMockResponse<T>(data: T, ok = true): Response {
     status: ok ? 200 : 500,
     statusText: ok ? 'OK' : 'Internal Server Error',
     json: () => Promise.resolve(data),
+    text: () => Promise.resolve(JSON.stringify(data)),
   } as unknown as Response;
 }
 
@@ -173,14 +174,62 @@ describe('HyperliquidConnector', () => {
 
   describe('placeMarketOrder', () => {
     it('returns order result for market order', async () => {
+      // 1. Meta call to get asset index
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({ universe: [{ name: 'BTC' }, { name: 'ETH' }] }),
+      );
+      // 2. Order book call
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          levels: [
+            [{ px: '3000.00', sz: '10', n: 1 }],
+            [{ px: '3001.00', sz: '10', n: 1 }],
+          ],
+        }),
+      );
+      // 3. Set leverage call
+      mockFetch.mockResolvedValueOnce(createMockResponse({ status: 'ok' }));
+      // 4. Exchange order call
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          status: 'ok',
+          response: {
+            type: 'order',
+            data: {
+              statuses: [{ filled: { totalSz: '1.5', avgPx: '3001.00', oid: 12345 } }],
+            },
+          },
+        }),
+      );
+
       const result = await connector.placeMarketOrder('ETH', 'long', '1.5', 10);
       expect(result.status).toBe('ok');
-      expect(result.orderId).toBeDefined();
+      expect(result.orderId).toBe(12345);
+      expect(result.filledSize).toBe('1.5');
     });
   });
 
   describe('placeLimitOrder', () => {
     it('returns order result for limit order', async () => {
+      // 1. Meta call to get asset index
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({ universe: [{ name: 'BTC' }, { name: 'ETH' }] }),
+      );
+      // 2. Set leverage call
+      mockFetch.mockResolvedValueOnce(createMockResponse({ status: 'ok' }));
+      // 3. Exchange order call
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          status: 'ok',
+          response: {
+            type: 'order',
+            data: {
+              statuses: [{ resting: { oid: 67890 } }],
+            },
+          },
+        }),
+      );
+
       const result = await connector.placeLimitOrder(
         'ETH',
         'short',
@@ -190,12 +239,19 @@ describe('HyperliquidConnector', () => {
         'GTC',
       );
       expect(result.status).toBe('ok');
-      expect(result.orderId).toBeDefined();
+      expect(result.orderId).toBe(67890);
     });
   });
 
   describe('cancelOrder', () => {
     it('returns true on successful cancellation', async () => {
+      // 1. Meta call
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({ universe: [{ name: 'BTC' }, { name: 'ETH' }] }),
+      );
+      // 2. Cancel call
+      mockFetch.mockResolvedValueOnce(createMockResponse({ status: 'ok' }));
+
       const result = await connector.cancelOrder('ETH', 12345);
       expect(result).toBe(true);
     });
@@ -203,6 +259,37 @@ describe('HyperliquidConnector', () => {
 
   describe('closePosition', () => {
     it('returns order result on close', async () => {
+      // 1. Positions query (clearinghouseState)
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          assetPositions: [
+            { position: { coin: 'ETH', szi: '1.5', leverage: { type: 'cross', value: 10 }, entryPx: '3000', positionValue: '4500', unrealizedPnl: '100', returnOnEquity: '0.02', liquidationPx: '2700', marginUsed: '450' } },
+          ],
+        }),
+      );
+      // 2. getAssetIndex meta call (inside placeMarketOrder)
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({ universe: [{ name: 'BTC' }, { name: 'ETH' }] }),
+      );
+      // 3. Order book for market order
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          levels: [
+            [{ px: '3000.00', sz: '10', n: 1 }],
+            [{ px: '3001.00', sz: '10', n: 1 }],
+          ],
+        }),
+      );
+      // 4. Set leverage
+      mockFetch.mockResolvedValueOnce(createMockResponse({ status: 'ok' }));
+      // 5. Exchange order
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          status: 'ok',
+          response: { type: 'order', data: { statuses: [{ filled: { totalSz: '1.5', avgPx: '3000.00', oid: 99999 } }] } },
+        }),
+      );
+
       const result = await connector.closePosition('ETH');
       expect(result.status).toBe('ok');
     });
@@ -223,9 +310,13 @@ describe('HyperliquidConnector', () => {
 
   describe('decimal conversion', () => {
     it('handles deposit and withdrawal', async () => {
+      // Deposit: exchange call
+      mockFetch.mockResolvedValueOnce(createMockResponse({ status: 'ok' }));
       const depositResult = await connector.depositToMargin('1000.00');
       expect(depositResult).toBe(true);
 
+      // Withdraw: exchange call
+      mockFetch.mockResolvedValueOnce(createMockResponse({ status: 'ok' }));
       const withdrawResult = await connector.withdrawFromMargin('500.00');
       expect(withdrawResult).toBe(true);
     });

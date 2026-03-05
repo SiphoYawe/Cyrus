@@ -124,9 +124,38 @@ export class TechnicalEvaluator implements Evaluator {
     };
   }
 
-  // Stub: in production, fetches from MarketDataService historical candles
-  getPriceHistory(_context: EvaluatorContext): number[] {
-    return [];
+  getPriceHistory(context: EvaluatorContext): number[] {
+    // Access MarketDataService's historicalPrices via the store's price data
+    // Collect all available prices from the strategy context's price map for this token
+    const prices: number[] = [];
+    const tokenAddr = context.tokenAddress;
+    const chainIdNum = context.chainId;
+
+    if (!tokenAddr) return prices;
+
+    // Check strategy context prices map for token entries
+    for (const [key, price] of context.strategyContext.prices) {
+      if (price > 0 && key.includes(tokenAddr as string)) {
+        prices.push(price);
+      }
+    }
+
+    // If we have a single current price, use the MarketDataService internal data
+    // The MarketDataService stores historical prices internally
+    // Access via the service's public interface (getTokenPrice populates historical data)
+    // For now, return what we have from context; strategies should call MarketDataService
+    // methods to populate historical data before evaluation
+    if (prices.length === 0) {
+      // Fallback: search all entries in price map for the token address
+      const addrLower = (tokenAddr as string).toLowerCase();
+      for (const [key, price] of context.strategyContext.prices) {
+        if (price > 0 && key.toLowerCase().includes(addrLower)) {
+          prices.push(price);
+        }
+      }
+    }
+
+    return prices;
   }
 
   // --- Static calculation methods ---

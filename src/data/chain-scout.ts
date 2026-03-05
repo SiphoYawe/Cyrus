@@ -147,40 +147,120 @@ export class ChainScout extends RunnableBase {
   // --- Data fetching methods (mockable in tests) ---
 
   async fetchChainMetrics(chainIdValue: number): Promise<ChainMetrics> {
-    // In production, this would call DeFiLlama or similar APIs
-    // For now, return existing metrics or a default placeholder
     const existing = this.chainMetrics.get(chainIdValue);
-    if (existing) {
-      return { ...existing };
+    const base: ChainMetrics = existing
+      ? { ...existing }
+      : {
+          chainId: chainIdValue,
+          chainName: this.getChainName(chainIdValue),
+          tvl: 0,
+          tvlHistory: [],
+          tvlInflowRate7d: 0,
+          tvlOutflowRate3d: 0,
+          protocolCount: 0,
+          newProtocolsPerWeek: 0,
+          uniqueActiveAddresses: 0,
+          activeAddressGrowthRate: 0,
+          bridgeVolumeUsd: 0,
+          chainAgeDays: 365,
+          airdropIndicators: [],
+          lastUpdated: Date.now(),
+        };
+
+    // Fetch real TVL from DeFiLlama
+    const defiLlamaChain = this.getDefiLlamaChainName(chainIdValue);
+    if (defiLlamaChain) {
+      try {
+        const res = await fetch(`https://api.llama.fi/v2/historicalChainTvl/${defiLlamaChain}`);
+        if (res.ok) {
+          const data = (await res.json()) as Array<{ date: number; tvl: number }>;
+          if (data.length > 0) {
+            const latest = data[data.length - 1]!;
+            base.tvl = latest.tvl;
+            // Build TVL history from last 30 days
+            const thirtyDaysAgo = Date.now() / 1000 - 30 * 24 * 60 * 60;
+            base.tvlHistory = data
+              .filter((d) => d.date >= thirtyDaysAgo)
+              .map((d) => ({ timestamp: d.date * 1000, value: d.tvl }));
+          }
+        }
+      } catch (err) {
+        this.logger.debug({ chainId: chainIdValue, error: (err as Error).message }, 'DeFiLlama TVL fetch failed');
+      }
     }
 
-    return {
-      chainId: chainIdValue,
-      chainName: this.getChainName(chainIdValue),
-      tvl: 0,
-      tvlHistory: [],
-      tvlInflowRate7d: 0,
-      tvlOutflowRate3d: 0,
-      protocolCount: 0,
-      newProtocolsPerWeek: 0,
-      uniqueActiveAddresses: 0,
-      activeAddressGrowthRate: 0,
-      bridgeVolumeUsd: 0,
-      chainAgeDays: 365,
-      airdropIndicators: [],
-      lastUpdated: Date.now(),
+    return base;
+  }
+
+  private getDefiLlamaChainName(chainIdValue: number): string | null {
+    const mapping: Record<number, string> = {
+      1: 'Ethereum',
+      10: 'Optimism',
+      56: 'BSC',
+      137: 'Polygon',
+      8453: 'Base',
+      42161: 'Arbitrum',
+      43114: 'Avalanche',
+      59144: 'Linea',
+      534352: 'Scroll',
+      324: 'Era',
     };
+    return mapping[chainIdValue] ?? null;
   }
 
-  async fetchProtocolCount(_chainIdValue: number): Promise<number> {
-    // In production, this would call DeFiLlama protocols endpoint
-    // Returns placeholder data — scoring logic is what matters
-    return 0;
+  async fetchProtocolCount(chainIdValue: number): Promise<number> {
+    const defiLlamaChain = this.getDefiLlamaChainName(chainIdValue);
+    if (!defiLlamaChain) return 0;
+
+    try {
+      const res = await fetch('https://api.llama.fi/protocols');
+      if (!res.ok) return 0;
+      const protocols = (await res.json()) as Array<{ chains: string[] }>;
+      return protocols.filter((p) =>
+        p.chains.some((c) => c.toLowerCase() === defiLlamaChain.toLowerCase()),
+      ).length;
+    } catch (err) {
+      this.logger.debug({ chainId: chainIdValue, error: (err as Error).message }, 'DeFiLlama protocol count fetch failed');
+      return 0;
+    }
   }
 
-  async detectAirdropIndicators(_chainIdValue: number): Promise<AirdropIndicator[]> {
-    // In production, would scan for governance token launches, TGEs, points programs
-    return [];
+  async detectAirdropIndicators(chainIdValue: number): Promise<AirdropIndicator[]> {
+    const defiLlamaChain = this.getDefiLlamaChainName(chainIdValue);
+    if (!defiLlamaChain) return [];
+
+    const indicators: AirdropIndicator[] = [];
+    try {
+      // Check for protocols on this chain that don't have a token yet (potential airdrop)
+      const res = await fetch('https://api.llama.fi/protocols');
+      if (!res.ok) return [];
+      const protocols = (await res.json()) as Array<{
+        name: string;
+        symbol: string;
+        chains: string[];
+        tvl: number;
+      }>;
+
+      for (const protocol of protocols) {
+        const onChain = protocol.chains.some(
+          (c) => c.toLowerCase() === defiLlamaChain.toLowerCase(),
+        );
+        if (!onChain) continue;
+        // Protocols with high TVL but no token symbol are airdrop candidates
+        if (protocol.tvl > 50_000_000 && (!protocol.symbol || protocol.symbol === '-')) {
+          indicators.push({
+            protocol: protocol.name,
+            type: 'token-distribution',
+            confidence: Math.min(1, protocol.tvl / 1_000_000_000),
+            detectedAt: Date.now(),
+          });
+        }
+      }
+    } catch (err) {
+      this.logger.debug({ chainId: chainIdValue, error: (err as Error).message }, 'Airdrop indicator detection failed');
+    }
+
+    return indicators;
   }
 
   async fetchBridgeVolume(chainIdValue: number): Promise<number> {
@@ -524,14 +604,53 @@ export class ChainScout extends RunnableBase {
     return total;
   }
 
-  async discoverTargetProtocols(_destinationChainId: number): Promise<TargetProtocol[]> {
-    // In production, query Composer-supported protocols for APYs
-    // For now, return well-known protocols as placeholders
-    return [
-      { protocol: 'aave-v3', apy: 0.05, tvl: 1_000_000_000 },
-      { protocol: 'morpho', apy: 0.07, tvl: 500_000_000 },
-      { protocol: 'euler', apy: 0.06, tvl: 300_000_000 },
-    ].sort((a, b) => b.apy - a.apy);
+  async discoverTargetProtocols(destinationChainId: number): Promise<TargetProtocol[]> {
+    const defiLlamaChain = this.getDefiLlamaChainName(destinationChainId);
+    if (!defiLlamaChain) return [];
+
+    try {
+      const res = await fetch('https://yields.llama.fi/pools');
+      if (!res.ok) return [];
+      const json = (await res.json()) as {
+        data: Array<{
+          project: string;
+          chain: string;
+          apy: number;
+          tvlUsd: number;
+          stablecoin: boolean;
+        }>;
+      };
+
+      // Filter pools for this chain, prefer stablecoin pools with meaningful TVL
+      const chainPools = json.data
+        .filter(
+          (p) =>
+            p.chain.toLowerCase() === defiLlamaChain.toLowerCase() &&
+            p.tvlUsd > 100_000 &&
+            p.apy > 0 &&
+            p.apy < 100, // Filter unrealistic APYs
+        )
+        .sort((a, b) => b.apy - a.apy);
+
+      // Deduplicate by project, take top APY per project
+      const seen = new Set<string>();
+      const protocols: TargetProtocol[] = [];
+      for (const pool of chainPools) {
+        if (seen.has(pool.project)) continue;
+        seen.add(pool.project);
+        protocols.push({
+          protocol: pool.project,
+          apy: pool.apy / 100, // Convert from percentage to decimal
+          tvl: pool.tvlUsd,
+        });
+        if (protocols.length >= 10) break;
+      }
+
+      return protocols.sort((a, b) => b.apy - a.apy);
+    } catch (err) {
+      this.logger.debug({ chainId: destinationChainId, error: (err as Error).message }, 'DeFiLlama yields fetch failed');
+      return [];
+    }
   }
 
   private async estimateBridgeCost(

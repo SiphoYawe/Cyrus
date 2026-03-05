@@ -432,14 +432,19 @@ export class OnChainIndexer extends RunnableBase {
 
   // --- Data source abstractions (mockable in tests) ---
 
-  async fetchProtocolTvl(_protocol: string, _chain: ChainId): Promise<number> {
-    // In production, this would call DeFiLlama or protocol APIs
-    // For now, return simulated data — strategies will override via dependency injection
-    return 0;
+  async fetchProtocolTvl(protocol: string, _chain: ChainId): Promise<number> {
+    try {
+      const res = await fetch(`https://api.llama.fi/tvl/${protocol}`);
+      if (!res.ok) return 0;
+      const tvl = Number(await res.text());
+      return Number.isFinite(tvl) ? tvl : 0;
+    } catch {
+      return 0;
+    }
   }
 
   async fetchWhaleTransactions(
-    _chain: ChainId,
+    chain: ChainId,
   ): Promise<
     Array<{
       txHash: string;
@@ -451,12 +456,89 @@ export class OnChainIndexer extends RunnableBase {
       dex: string;
     }>
   > {
-    // In production, this would query block explorers or RPC event logs
-    return [];
+    // Use Etherscan-compatible APIs to find large token transfers from/to whale wallets
+    const explorerApis: Record<number, { url: string; keyParam: string }> = {
+      1: { url: 'https://api.etherscan.io/api', keyParam: 'apikey' },
+      42161: { url: 'https://api.arbiscan.io/api', keyParam: 'apikey' },
+      10: { url: 'https://api-optimistic.etherscan.io/api', keyParam: 'apikey' },
+      137: { url: 'https://api.polygonscan.com/api', keyParam: 'apikey' },
+      8453: { url: 'https://api.basescan.org/api', keyParam: 'apikey' },
+      56: { url: 'https://api.bscscan.com/api', keyParam: 'apikey' },
+    };
+
+    const explorer = explorerApis[chain as number];
+    if (!explorer) return [];
+
+    const results: Array<{
+      txHash: string; wallet: string; token: string;
+      amount: bigint; amountUsd: number; direction: 'buy' | 'sell'; dex: string;
+    }> = [];
+
+    // Check a subset of whale wallets per tick to stay within rate limits
+    const walletsToCheck = this.whaleWallets.slice(0, 3);
+
+    for (const whale of walletsToCheck) {
+      try {
+        const params = new URLSearchParams({
+          module: 'account',
+          action: 'tokentx',
+          address: whale.address,
+          page: '1',
+          offset: '10',
+          sort: 'desc',
+        });
+
+        const response = await fetch(`${explorer.url}?${params.toString()}`);
+        if (!response.ok) continue;
+
+        const data = (await response.json()) as {
+          status: string;
+          result: Array<{
+            hash: string;
+            from: string;
+            to: string;
+            contractAddress: string;
+            tokenDecimal: string;
+            value: string;
+            tokenSymbol: string;
+          }>;
+        };
+
+        if (data.status !== '1' || !Array.isArray(data.result)) continue;
+
+        for (const tx of data.result) {
+          const decimals = parseInt(tx.tokenDecimal) || 18;
+          const rawAmount = BigInt(tx.value);
+          // Approximate USD value (assume stablecoin-like for threshold check)
+          const approxUsd = Number(rawAmount) / Math.pow(10, decimals);
+
+          if (approxUsd < this.config.whaleThresholdUsd) continue;
+
+          const isOutgoing = tx.from.toLowerCase() === whale.address.toLowerCase();
+
+          results.push({
+            txHash: tx.hash,
+            wallet: whale.address,
+            token: tx.contractAddress,
+            amount: rawAmount,
+            amountUsd: approxUsd,
+            direction: isOutgoing ? 'sell' : 'buy',
+            dex: 'unknown',
+          });
+        }
+      } catch (err) {
+        this.logger.debug(
+          { wallet: whale.label, error: (err as Error).message },
+          'Whale tx fetch failed for wallet',
+        );
+      }
+    }
+
+    return results;
   }
 
   async fetchLiquidityEvents(
-    _chain: ChainId,
+    chain: ChainId,
   ): Promise<
     Array<{
       poolAddress: string;
@@ -467,23 +549,206 @@ export class OnChainIndexer extends RunnableBase {
       direction: 'add' | 'remove';
     }>
   > {
-    // In production, this would monitor DEX pool events
-    return [];
+    // Use The Graph Uniswap v3 subgraphs to query recent mint/burn events
+    const subgraphUrls: Record<number, string> = {
+      1: 'https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3',
+      42161: 'https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v3-arbitrum',
+      10: 'https://api.thegraph.com/subgraphs/name/ianlapham/optimism-post-regenesis',
+      137: 'https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v3-polygon',
+      8453: 'https://api.thegraph.com/subgraphs/name/lynnshaoyu/uniswap-v3-base',
+    };
+
+    const subgraphUrl = subgraphUrls[chain as number];
+    if (!subgraphUrl) return [];
+
+    try {
+      // Query recent mints (liquidity additions) and burns (removals)
+      const query = `{
+        mints(first: 10, orderBy: timestamp, orderDirection: desc) {
+          id
+          pool { id token0 { id } token1 { id } }
+          amount0
+          amount1
+          amountUSD
+          timestamp
+        }
+        burns(first: 10, orderBy: timestamp, orderDirection: desc) {
+          id
+          pool { id token0 { id } token1 { id } }
+          amount0
+          amount1
+          amountUSD
+          timestamp
+        }
+      }`;
+
+      const response = await fetch(subgraphUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query }),
+      });
+
+      if (!response.ok) return [];
+
+      const data = (await response.json()) as {
+        data: {
+          mints: Array<{
+            id: string;
+            pool: { id: string; token0: { id: string }; token1: { id: string } };
+            amount0: string; amount1: string; amountUSD: string;
+          }>;
+          burns: Array<{
+            id: string;
+            pool: { id: string; token0: { id: string }; token1: { id: string } };
+            amount0: string; amount1: string; amountUSD: string;
+          }>;
+        };
+      };
+
+      const results: Array<{
+        poolAddress: string; token0: string; token1: string;
+        amount: bigint; amountUsd: number; direction: 'add' | 'remove';
+      }> = [];
+
+      const minAmountUsd = 10_000; // Only track significant events
+
+      for (const mint of data.data?.mints ?? []) {
+        const amountUsd = parseFloat(mint.amountUSD);
+        if (amountUsd < minAmountUsd) continue;
+        results.push({
+          poolAddress: mint.pool.id,
+          token0: mint.pool.token0.id,
+          token1: mint.pool.token1.id,
+          amount: BigInt(Math.round(amountUsd * 1e6)),
+          amountUsd,
+          direction: 'add',
+        });
+      }
+
+      for (const burn of data.data?.burns ?? []) {
+        const amountUsd = parseFloat(burn.amountUSD);
+        if (amountUsd < minAmountUsd) continue;
+        results.push({
+          poolAddress: burn.pool.id,
+          token0: burn.pool.token0.id,
+          token1: burn.pool.token1.id,
+          amount: BigInt(Math.round(amountUsd * 1e6)),
+          amountUsd,
+          direction: 'remove',
+        });
+      }
+
+      return results;
+    } catch (err) {
+      this.logger.warn(
+        { chain: chain as number, error: (err as Error).message },
+        'Liquidity events subgraph query failed',
+      );
+      return [];
+    }
   }
 
   async fetchGasPrice(
-    _chain: ChainId,
+    chain: ChainId,
   ): Promise<{ gasPriceGwei: number; baseFeeGwei: number; priorityFeeGwei: number }> {
-    // In production, this would call eth_gasPrice / eth_feeHistory via RPC
-    return { gasPriceGwei: 0, baseFeeGwei: 0, priorityFeeGwei: 0 };
+    // Use public RPC endpoints to fetch real gas prices
+    const rpcUrls: Record<number, string> = {
+      1: 'https://eth.llamarpc.com',
+      10: 'https://mainnet.optimism.io',
+      56: 'https://bsc-dataseed.binance.org',
+      137: 'https://polygon-rpc.com',
+      8453: 'https://mainnet.base.org',
+      42161: 'https://arb1.arbitrum.io/rpc',
+    };
+
+    const rpc = rpcUrls[chain as number];
+    if (!rpc) return { gasPriceGwei: 0, baseFeeGwei: 0, priorityFeeGwei: 0 };
+
+    try {
+      // Fetch gas price via eth_gasPrice
+      const gasPriceResponse = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_gasPrice', params: [] }),
+      });
+
+      if (!gasPriceResponse.ok) return { gasPriceGwei: 0, baseFeeGwei: 0, priorityFeeGwei: 0 };
+
+      const gasPriceData = (await gasPriceResponse.json()) as { result: string };
+      const gasPriceWei = parseInt(gasPriceData.result, 16);
+      const gasPriceGwei = gasPriceWei / 1e9;
+
+      // Try to fetch base fee from latest block
+      let baseFeeGwei = 0;
+      let priorityFeeGwei = 0;
+
+      try {
+        const blockResponse = await fetch(rpc, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_getBlockByNumber', params: ['latest', false] }),
+        });
+
+        if (blockResponse.ok) {
+          const blockData = (await blockResponse.json()) as { result: { baseFeePerGas?: string } };
+          if (blockData.result?.baseFeePerGas) {
+            baseFeeGwei = parseInt(blockData.result.baseFeePerGas, 16) / 1e9;
+            priorityFeeGwei = Math.max(0, gasPriceGwei - baseFeeGwei);
+          }
+        }
+      } catch {
+        // baseFee not available on all chains (e.g., pre-EIP-1559)
+        baseFeeGwei = gasPriceGwei * 0.8;
+        priorityFeeGwei = gasPriceGwei * 0.2;
+      }
+
+      return { gasPriceGwei, baseFeeGwei, priorityFeeGwei };
+    } catch (err) {
+      this.logger.warn({ chain: chain as number, error: (err as Error).message }, 'Gas price RPC error');
+      return { gasPriceGwei: 0, baseFeeGwei: 0, priorityFeeGwei: 0 };
+    }
   }
 
   async fetchApyRates(
-    _protocol: string,
-    _chain: ChainId,
+    protocol: string,
+    chain: ChainId,
   ): Promise<Array<{ asset: TokenAddress; apy: number }>> {
-    // In production, this would query protocol APIs for current APY rates
-    return [];
+    const chainNames: Record<number, string> = {
+      1: 'Ethereum', 10: 'Optimism', 56: 'BSC', 137: 'Polygon',
+      8453: 'Base', 42161: 'Arbitrum',
+    };
+    const chainName = chainNames[chain as number];
+    if (!chainName) return [];
+
+    try {
+      const res = await fetch('https://yields.llama.fi/pools');
+      if (!res.ok) return [];
+      const json = (await res.json()) as {
+        data: Array<{
+          project: string;
+          chain: string;
+          apy: number;
+          underlyingTokens: string[] | null;
+        }>;
+      };
+
+      return json.data
+        .filter(
+          (p) =>
+            p.project.toLowerCase() === protocol.toLowerCase() &&
+            p.chain.toLowerCase() === chainName.toLowerCase() &&
+            p.apy > 0 &&
+            p.apy < 100 &&
+            p.underlyingTokens?.length,
+        )
+        .slice(0, 20)
+        .map((p) => ({
+          asset: (p.underlyingTokens![0] ?? '0x0') as TokenAddress,
+          apy: p.apy / 100,
+        }));
+    } catch {
+      return [];
+    }
   }
 
   // --- Public method to add flow data (called by external data sources) ---

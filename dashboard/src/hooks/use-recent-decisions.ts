@@ -49,8 +49,11 @@ export function useRecentDecisions(limit = 5): UseRecentDecisionsResult {
         throw new Error(`Decisions fetch failed: ${res.status}`);
       }
 
-      const json = await res.json() as DecisionReport[];
-      setData(json);
+      const raw = await res.json() as { ok?: boolean; data?: { activities?: DecisionReport[] } };
+      const json = raw.ok && raw.data
+        ? (raw.data.activities ?? raw.data as unknown as DecisionReport[])
+        : (raw as unknown as DecisionReport[]);
+      setData(Array.isArray(json) ? json : []);
       setError(null);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return;

@@ -56,7 +56,8 @@ export function usePortfolioOverview(): UsePortfolioOverviewResult {
         throw new Error(`Portfolio fetch failed: ${res.status}`);
       }
 
-      const json = await res.json() as Partial<PortfolioState>;
+      const raw = await res.json() as { ok?: boolean; data?: Partial<PortfolioState> };
+      const json = raw.ok && raw.data ? raw.data : (raw as Partial<PortfolioState>);
       errorRef.current = null;
       setPortfolio(json);
     } catch (err) {

@@ -74,7 +74,8 @@ export function useStrategyDetail(strategyName: string | null): UseStrategyDetai
         throw new Error(`Strategy detail fetch failed: ${res.status}`);
       }
 
-      const json = (await res.json()) as StrategyDetailData;
+      const raw = (await res.json()) as { ok?: boolean; data?: StrategyDetailData };
+      const json = raw.ok && raw.data ? raw.data : (raw as unknown as StrategyDetailData);
       setData(json);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return;

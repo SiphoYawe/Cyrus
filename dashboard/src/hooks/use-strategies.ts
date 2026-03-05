@@ -38,9 +38,10 @@ export function useStrategies(): UseStrategiesResult {
         throw new Error(`Strategies fetch failed: ${res.status}`);
       }
 
-      const json = (await res.json()) as Strategy[];
+      const json = (await res.json()) as { ok: boolean; data: Strategy[] };
+      const strategies = json.ok ? json.data : (json as unknown as Strategy[]);
       errorRef.current = null;
-      setStrategies(json);
+      setStrategies(Array.isArray(strategies) ? strategies : []);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return;
       errorRef.current = err instanceof Error ? err : new Error(String(err));

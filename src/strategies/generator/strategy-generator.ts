@@ -2,6 +2,8 @@
 // Generates, validates, backtests, and promotes strategy variants using Claude API
 
 import { randomUUID } from 'node:crypto';
+import { readdir, readFile } from 'node:fs/promises';
+import { resolve, join, basename } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import { RunnableBase } from '../../core/runnable-base.js';
 import { Store } from '../../core/store.js';
@@ -504,36 +506,83 @@ Generate ${count} meaningfully different variants. Each should have a distinct a
 
   /**
    * Get source code of the top performing strategy.
-   * Returns a placeholder when no strategies are available.
+   * Reads from the builtin strategies directory and returns the cross-chain-arb
+   * strategy source as the default base for evolution.
    */
   private getTopPerformingStrategySource(): string {
-    // In a full implementation, this would query the strategy loader
-    // for the best-performing live strategy's source code
-    return `import type { StrategySignal, ExecutionPlan, StrategyContext } from '../core/types.js';
-import { CrossChainStrategy } from './cross-chain-strategy.js';
+    // Return the cached source if we have it
+    if (this.cachedBaseStrategySource) return this.cachedBaseStrategySource;
+
+    // Default to cross-chain-arb as the base strategy for evolution
+    return this.defaultBaseStrategySource;
+  }
+
+  private cachedBaseStrategySource: string | null = null;
+  private readonly defaultBaseStrategySource = `import { CrossChainStrategy } from '../cross-chain-strategy.js';
+import type { StrategySignal, ExecutionPlan, StrategyContext, ChainId, TokenAddress, TokenInfo } from '../../core/types.js';
+import { chainId, tokenAddress } from '../../core/types.js';
 
 export class BaseStrategy extends CrossChainStrategy {
   readonly name = 'base-strategy';
-  readonly timeframe = '5m';
-  override readonly stoploss = -0.05;
-  override readonly maxPositions = 3;
-  override readonly minimalRoi = { 0: 0.03, 60: 0.01 };
+  readonly timeframe = '30s';
+  override readonly stoploss = -0.03;
+  override readonly maxPositions = 5;
+  override readonly minimalRoi = { 0: 0.003 };
+  override readonly trailingStop = true;
 
   shouldExecute(context: StrategyContext): StrategySignal | null {
+    if (context.positions.length >= this.maxPositions) return null;
+    if (context.prices.size < 2) return null;
+
+    // Compare same-token prices across chains for arb
+    const tokenPrices = new Map<string, { chainId: ChainId; price: number }[]>();
+    for (const [key, price] of context.prices) {
+      const dashIndex = key.indexOf('-');
+      if (dashIndex === -1) continue;
+      const chain = Number(key.substring(0, dashIndex));
+      const token = key.substring(dashIndex + 1);
+      const entries = tokenPrices.get(token) ?? [];
+      entries.push({ chainId: chainId(chain), price });
+      tokenPrices.set(token, entries);
+    }
+
+    for (const [token, entries] of tokenPrices) {
+      if (entries.length < 2) continue;
+      const sorted = [...entries].sort((a, b) => a.price - b.price);
+      const cheapest = sorted[0]!;
+      const most = sorted[sorted.length - 1]!;
+      const spread = (most.price - cheapest.price) / cheapest.price;
+      if (spread > 0.008) {
+        const info: TokenInfo = { address: tokenAddress(token), symbol: token.slice(0, 6), decimals: 18 };
+        return {
+          direction: 'long', tokenPair: { from: info, to: info },
+          sourceChain: cheapest.chainId, destChain: most.chainId,
+          strength: Math.min(spread / 0.01, 1),
+          metadata: { spread, buyPrice: cheapest.price, sellPrice: most.price },
+        };
+      }
+    }
     return null;
   }
 
-  buildExecution(signal: StrategySignal, context: StrategyContext): ExecutionPlan {
-    return {
-      id: 'plan-1',
-      strategyName: this.name,
-      actions: [],
-      estimatedCostUsd: 0,
-      estimatedDurationMs: 0,
-      metadata: {},
-    };
+  buildExecution(signal: StrategySignal, _context: StrategyContext): ExecutionPlan {
+    return { id: 'plan-1', strategyName: this.name, actions: [], estimatedCostUsd: 0, estimatedDurationMs: 120000, metadata: signal.metadata };
   }
 }`;
+
+  /**
+   * Load the source code of a real strategy file for use as evolution base.
+   * Call this during initialization to cache the best strategy source.
+   */
+  async loadBaseStrategyFromDisk(strategyPath?: string): Promise<void> {
+    try {
+      const defaultPath = resolve('./src/strategies/builtin/cross-chain-arb.ts');
+      const targetPath = strategyPath ?? defaultPath;
+      this.cachedBaseStrategySource = await readFile(targetPath, 'utf-8');
+      this.logger.info({ path: targetPath }, 'Loaded base strategy source for evolution');
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Could not load strategy source, using default');
+    }
   }
 
   /**

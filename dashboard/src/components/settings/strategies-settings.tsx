@@ -6,66 +6,24 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { ChevronDownIcon, ChevronRightIcon } from 'lucide-react';
+import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import { useWebSocket } from '@/providers/ws-provider';
-import { useAgentStore } from '@/stores/agent-store';
+import { useStrategies } from '@/hooks/use-strategies';
 import { WS_COMMANDS } from '@/types/ws';
 import { toast } from 'sonner';
-
-interface StrategyParam {
-  readonly key: string;
-  readonly label: string;
-  readonly type: 'number' | 'text';
-  readonly placeholder?: string;
-}
-
-interface StrategyDef {
-  readonly name: string;
-  readonly description: string;
-  readonly params: readonly StrategyParam[];
-}
-
-const DEFAULT_STRATEGIES: readonly StrategyDef[] = [
-  {
-    name: 'YieldHunter',
-    description: 'Automatically routes capital to highest-yield vaults across chains.',
-    params: [
-      { key: 'minYieldBps',       label: 'Min yield (bps)',      type: 'number', placeholder: '50' },
-      { key: 'maxPositionUsd',    label: 'Max position (USD)',   type: 'number', placeholder: '10000' },
-      { key: 'rebalanceInterval', label: 'Rebalance interval (s)', type: 'number', placeholder: '3600' },
-    ],
-  },
-  {
-    name: 'CrossChainArb',
-    description: 'Exploits price differences for the same token across chains.',
-    params: [
-      { key: 'minProfitBps', label: 'Min profit (bps)',  type: 'number', placeholder: '20' },
-      { key: 'maxSlippage',  label: 'Max slippage (bps)', type: 'number', placeholder: '30' },
-      { key: 'maxGasUsd',    label: 'Max gas (USD)',      type: 'number', placeholder: '5' },
-    ],
-  },
-  {
-    name: 'StatArb',
-    description: 'Mean-reversion pair trading based on cointegrated token pairs.',
-    params: [
-      { key: 'zScoreEntry',    label: 'Z-score entry threshold',  type: 'number', placeholder: '1.5' },
-      { key: 'zScoreExit',     label: 'Z-score exit threshold',   type: 'number', placeholder: '0.5' },
-      { key: 'maxPairPositions', label: 'Max pair positions',    type: 'number', placeholder: '10' },
-    ],
-  },
-] as const;
+import type { Strategy } from '@/stores/strategies-store';
 
 interface StrategyRowProps {
-  strategy: StrategyDef;
-  enabled: boolean;
+  strategy: Strategy;
   onToggle: (name: string, enabled: boolean) => void;
   onSaveParams: (name: string, params: Record<string, string>) => void;
 }
 
-function StrategyRow({ strategy, enabled, onToggle, onSaveParams }: StrategyRowProps) {
+function StrategyRow({ strategy, onToggle, onSaveParams }: StrategyRowProps) {
   const [open, setOpen] = useState(false);
   const [params, setParams] = useState<Record<string, string>>(() =>
-    Object.fromEntries(strategy.params.map((p) => [p.key, p.placeholder ?? ''])),
+    Object.fromEntries(strategy.params.map((p) => [p.key, String(p.value)])),
   );
   const [dirty, setDirty] = useState(false);
 
@@ -99,54 +57,57 @@ function StrategyRow({ strategy, enabled, onToggle, onSaveParams }: StrategyRowP
               )}
               <div>
                 <p className="text-sm font-medium text-foreground">{strategy.name}</p>
-                <p className="text-xs text-muted-foreground">{strategy.description}</p>
+                <p className="text-xs text-muted-foreground">
+                  {strategy.tier} tier &middot; {strategy.metrics.totalTrades} trades
+                </p>
               </div>
             </button>
           </CollapsibleTrigger>
           <Switch
-            checked={enabled}
+            checked={strategy.enabled}
             onCheckedChange={(v) => onToggle(strategy.name, v)}
             aria-label={`Toggle ${strategy.name} strategy`}
           />
         </div>
 
-        <CollapsibleContent id={`strategy-params-${strategy.name}`}>
-          <div className="border-t border-border px-4 pb-4 pt-3 space-y-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Parameters
-            </p>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {strategy.params.map((param) => (
-                <div key={param.key} className="space-y-1">
-                  <label
-                    htmlFor={`${strategy.name}-${param.key}`}
-                    className="text-xs text-muted-foreground"
-                  >
-                    {param.label}
-                  </label>
-                  <Input
-                    id={`${strategy.name}-${param.key}`}
-                    type={param.type}
-                    value={params[param.key] ?? ''}
-                    placeholder={param.placeholder}
-                    onChange={(e) => handleParamChange(param.key, e.target.value)}
-                    className="h-8 text-sm"
-                  />
-                </div>
-              ))}
+        {strategy.params.length > 0 && (
+          <CollapsibleContent id={`strategy-params-${strategy.name}`}>
+            <div className="border-t border-border px-4 pb-4 pt-3 space-y-3">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Parameters
+              </p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {strategy.params.map((param) => (
+                  <div key={param.key} className="space-y-1">
+                    <label
+                      htmlFor={`${strategy.name}-${param.key}`}
+                      className="text-xs text-muted-foreground"
+                    >
+                      {param.description ?? param.key}
+                    </label>
+                    <Input
+                      id={`${strategy.name}-${param.key}`}
+                      type={typeof param.value === 'number' ? 'number' : 'text'}
+                      value={params[param.key] ?? ''}
+                      onChange={(e) => handleParamChange(param.key, e.target.value)}
+                      className="h-8 text-sm"
+                    />
+                  </div>
+                ))}
+              </div>
+              {dirty && (
+                <Button
+                  size="sm"
+                  variant="default"
+                  className="mt-1 bg-violet-500 text-white hover:bg-violet-600"
+                  onClick={handleSave}
+                >
+                  Save Parameters
+                </Button>
+              )}
             </div>
-            {dirty && (
-              <Button
-                size="sm"
-                variant="default"
-                className="mt-1 bg-violet-500 text-white hover:bg-violet-600"
-                onClick={handleSave}
-              >
-                Save Parameters
-              </Button>
-            )}
-          </div>
-        </CollapsibleContent>
+          </CollapsibleContent>
+        )}
       </div>
     </Collapsible>
   );
@@ -158,17 +119,10 @@ interface StrategiesSettingsProps {
 
 export function StrategiesSettings({ className }: StrategiesSettingsProps) {
   const { send } = useWebSocket();
-  const activeStrategies = useAgentStore((s) => s.activeStrategies);
-
-  const [enabledMap, setEnabledMap] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(
-      DEFAULT_STRATEGIES.map((s) => [s.name, activeStrategies.includes(s.name)]),
-    ),
-  );
+  const { strategies, isLoading } = useStrategies();
 
   const handleToggle = useCallback(
     (name: string, enabled: boolean) => {
-      setEnabledMap((prev) => ({ ...prev, [name]: enabled }));
       send({
         command: WS_COMMANDS.STRATEGY_TOGGLE,
         payload: { strategy: name, enabled },
@@ -189,13 +143,32 @@ export function StrategiesSettings({ className }: StrategiesSettingsProps) {
     [send],
   );
 
+  if (isLoading) {
+    return (
+      <div className={cn('space-y-3', className)}>
+        {[1, 2, 3].map((i) => (
+          <Skeleton key={i} className="h-16 w-full rounded-lg" />
+        ))}
+      </div>
+    );
+  }
+
+  if (strategies.length === 0) {
+    return (
+      <div className={cn('space-y-3', className)}>
+        <p className="text-sm text-muted-foreground">
+          No strategies loaded. Add strategy classes to the strategies directory to get started.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className={cn('space-y-3', className)}>
-      {DEFAULT_STRATEGIES.map((strategy) => (
+      {strategies.map((strategy) => (
         <StrategyRow
           key={strategy.name}
           strategy={strategy}
-          enabled={enabledMap[strategy.name] ?? false}
           onToggle={handleToggle}
           onSaveParams={handleSaveParams}
         />

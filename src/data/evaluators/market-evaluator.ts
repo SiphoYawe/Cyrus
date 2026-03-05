@@ -27,9 +27,20 @@ export class MarketEvaluator implements Evaluator {
     if (chainId && tokenAddress) {
       try {
         const currentPrice = await this.marketData.getTokenPrice(chainId, tokenAddress);
-        // Simple price-based trend — in production, compare to historical prices
-        priceTrendScore = currentPrice > 0 ? 0.1 : 0; // stub: slightly positive when price exists
-        availableComponents++;
+        if (currentPrice > 0) {
+          // Compare current price against recent moving average from volume data
+          try {
+            const vol = await this.marketData.getVolume(tokenAddress, chainId, '24h');
+            // Use buy/sell ratio as a proxy for price momentum
+            const momentum = (vol.buySellRatio - 1);
+            // Scale: ratio of 1.2 (20% more buying) => +0.4 score
+            priceTrendScore = Math.max(-1, Math.min(1, momentum * 2));
+          } catch {
+            // If volume unavailable, use a simple positive signal for non-zero price
+            priceTrendScore = 0.05;
+          }
+          availableComponents++;
+        }
       } catch (err) {
         logger.debug({ err, component: 'priceTrend' }, 'Price trend data unavailable');
       }

@@ -6,10 +6,10 @@ import type { Store } from './store.js';
 import type { PersistenceService } from './persistence.js';
 import type { CyrusConfig } from './config.js';
 import { sendError, ERROR_CODES } from './rest-types.js';
-import { handleHealth } from './rest-handlers/health-handler.js';
+import { createHealthHandler } from './rest-handlers/health-handler.js';
 import { createPortfolioHandler } from './rest-handlers/portfolio-handler.js';
 import { createActivityHandler } from './rest-handlers/activity-handler.js';
-import { handleStrategies } from './rest-handlers/strategies-handler.js';
+import { createStrategiesHandler } from './rest-handlers/strategies-handler.js';
 import { createConfigHandler } from './rest-handlers/config-handler.js';
 
 const logger = createLogger('rest-server');
@@ -20,6 +20,7 @@ export interface AgentRestServerDeps {
   readonly store: Store;
   readonly persistence: PersistenceService;
   readonly config: CyrusConfig;
+  readonly agent?: { getTickCount: () => number; isRunning: () => boolean };
 }
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
@@ -36,10 +37,10 @@ export class AgentRestServer {
 
     // Register route handlers
     this.routes = new Map<string, RouteHandler>();
-    this.routes.set('/api/health', handleHealth);
+    this.routes.set('/api/health', createHealthHandler(deps.agent));
     this.routes.set('/api/portfolio', createPortfolioHandler(deps.store));
     this.routes.set('/api/activity', createActivityHandler(deps.persistence));
-    this.routes.set('/api/strategies', handleStrategies);
+    this.routes.set('/api/strategies', createStrategiesHandler(deps.store, deps.config));
     this.routes.set('/api/config', createConfigHandler(deps.config));
 
     this.server = createServer((req, res) => {

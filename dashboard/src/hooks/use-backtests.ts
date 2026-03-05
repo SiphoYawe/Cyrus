@@ -82,8 +82,9 @@ export function useBacktests(): UseBacktestsResult {
         throw new Error(`Backtests fetch failed: ${res.status}`);
       }
 
-      const json = (await res.json()) as BacktestSummary[];
-      setBacktests(json);
+      const raw = (await res.json()) as { ok?: boolean; data?: BacktestSummary[] };
+      const json = raw.ok && raw.data ? raw.data : (raw as unknown as BacktestSummary[]);
+      setBacktests(Array.isArray(json) ? json : []);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return;
       setError(err instanceof Error ? err : new Error(String(err)));
@@ -137,7 +138,8 @@ export function useBacktestDetail(backtestId: string | null): UseBacktestDetailR
         throw new Error(`Backtest detail fetch failed: ${res.status}`);
       }
 
-      const json = (await res.json()) as BacktestDetail;
+      const raw = (await res.json()) as { ok?: boolean; data?: BacktestDetail };
+      const json = raw.ok && raw.data ? raw.data : (raw as unknown as BacktestDetail);
       setDetail(json);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return;
@@ -203,7 +205,8 @@ export function useBacktestComparison(backtestIds: string[]): UseBacktestCompari
             throw new Error(`Backtest comparison fetch failed for ${id}: ${res.status}`);
           }
 
-          return (await res.json()) as BacktestDetail;
+          const raw = (await res.json()) as { ok?: boolean; data?: BacktestDetail };
+          return raw.ok && raw.data ? raw.data : (raw as unknown as BacktestDetail);
         })
       );
 

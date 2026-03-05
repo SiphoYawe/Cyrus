@@ -51,6 +51,7 @@ async function main(): Promise<void> {
     store,
     persistence,
     config,
+    agent,
   });
 
   // Start REST first so HTTP server is listening
