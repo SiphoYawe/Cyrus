@@ -1,0 +1,55 @@
+{
+  "name": "cyrus-agent",
+  "version": "1.0.0",
+  "description": "Cyrus autonomous cross-chain DeFi agent — powered by LI.FI",
+  "channels": ["whatsapp", "telegram", "discord"],
+  "agents": [
+    {
+      "name": "cyrus",
+      "description": "Autonomous cross-chain DeFi agent with portfolio management, trading, and yield optimization",
+      "workspace": "./workspace"
+    }
+  ],
+  "heartbeat": {
+    "enabled": true,
+    "intervalMs": 60000,
+    "tool": "heartbeat"
+  },
+  "cron": [
+    {
+      "schedule": "0 8 * * *",
+      "tool": "report",
+      "params": { "limit": 5 },
+      "description": "Morning briefing: last 5 decisions"
+    },
+    {
+      "schedule": "0 */4 * * *",
+      "tool": "heartbeat",
+      "params": {},
+      "description": "Health check every 4 hours"
+    }
+  ],
+  "tools": [
+    "portfolio",
+    "positions",
+    "strategies",
+    "swap",
+    "bridge",
+    "yield",
+    "risk-dial",
+    "heartbeat",
+    "report",
+    "trade-preview",
+    "trade-approve"
+  ],
+  "approval": {
+    "required": true,
+    "ttlMs": 300000,
+    "autoApproveBelow": 0,
+    "actionsRequiringApproval": ["swap", "bridge", "trade-preview"]
+  },
+  "rest": {
+    "enabled": true,
+    "basePath": "/api"
+  }
+}
