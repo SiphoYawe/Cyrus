@@ -396,6 +396,7 @@ export class FlashOrchestrator extends RunnableBase {
       borrowedAmount: loop.borrowAmount,
       borrowedToken: loop.borrowToken,
       borrowChain: loop.sourceChain,
+      flashLoanProvider: loop.flashLoanProvider,
       currentTokenAmount: loop.borrowAmount,
       currentTokenChain: loop.sourceChain,
       txHashes: [],
@@ -662,8 +663,9 @@ export class FlashOrchestrator extends RunnableBase {
     const durationMs = Date.now() - loopState.startedAt;
 
     // Calculate actual profit from token amounts (current - borrowed - fee)
+    const provider = loopState.flashLoanProvider ?? 'aave-v3';
     const fee = loopState.borrowedAmount > 0n
-      ? FlashExecutor.calculateFee('aave-v3', loopState.borrowedAmount)
+      ? FlashExecutor.calculateFee(provider, loopState.borrowedAmount)
       : 0n;
     const totalRepayment = loopState.borrowedAmount + fee;
     // Token-level profit (positive = profit, negative = loss)

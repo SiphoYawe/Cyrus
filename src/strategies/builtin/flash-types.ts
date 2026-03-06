@@ -56,6 +56,7 @@ export interface LoopExecutionState {
   readonly borrowedAmount: bigint;
   readonly borrowedToken: TokenAddress;
   readonly borrowChain: ChainId;
+  readonly flashLoanProvider?: FlashLoanProvider;
   currentTokenAmount: bigint;
   currentTokenChain: ChainId;
   txHashes: string[];

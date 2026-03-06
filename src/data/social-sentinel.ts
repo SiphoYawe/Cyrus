@@ -257,6 +257,8 @@ export class SocialSentinel extends RunnableBase {
     this.tokenIndex.clear();
     this.mentionCounts.clear();
     this.signalCounter = 0;
+    this.sourceLastPollTime.clear();
+    this.sourceSignalCount.clear();
   }
 
   get signalCount(): number {
