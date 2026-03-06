@@ -104,12 +104,8 @@ export class PairTradePnl {
     const fundingSummary = this.fundingTracker.getCumulativeFunding(positionId);
     const fundingPnl = Number(fundingSummary.netTotal) / 1e18;
 
-    // Fees: StatArbPosition model does not store per-order fees.
-    // PairPositionManager returns fees in PairCloseResult but they are not
-    // persisted back to the position. Until a fees field is added to the
-    // position model (cross-story concern), totalFees will be 0.
-    // TODO: propagate fees from PairCloseResult into StatArbPosition.
-    const totalFees = 0;
+    // Fees accumulated from order execution (entry + close fills)
+    const totalFees = pos.totalFees ?? 0;
 
     const netPnl = longPnl + shortPnl + fundingPnl - totalFees;
     const marginUsed = pos.marginUsed;

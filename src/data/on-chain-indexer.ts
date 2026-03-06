@@ -457,13 +457,14 @@ export class OnChainIndexer extends RunnableBase {
     }>
   > {
     // Use Etherscan-compatible APIs to find large token transfers from/to whale wallets
-    const explorerApis: Record<number, { url: string; keyParam: string }> = {
-      1: { url: 'https://api.etherscan.io/api', keyParam: 'apikey' },
-      42161: { url: 'https://api.arbiscan.io/api', keyParam: 'apikey' },
-      10: { url: 'https://api-optimistic.etherscan.io/api', keyParam: 'apikey' },
-      137: { url: 'https://api.polygonscan.com/api', keyParam: 'apikey' },
-      8453: { url: 'https://api.basescan.org/api', keyParam: 'apikey' },
-      56: { url: 'https://api.bscscan.com/api', keyParam: 'apikey' },
+    // API keys read from env: ETHERSCAN_API_KEY (Ethereum), ARBISCAN_API_KEY (Arbitrum), etc.
+    const explorerApis: Record<number, { url: string; keyParam: string; apiKey: string | undefined }> = {
+      1: { url: 'https://api.etherscan.io/api', keyParam: 'apikey', apiKey: process.env.ETHERSCAN_API_KEY },
+      42161: { url: 'https://api.arbiscan.io/api', keyParam: 'apikey', apiKey: process.env.ARBISCAN_API_KEY ?? process.env.ETHERSCAN_API_KEY },
+      10: { url: 'https://api-optimistic.etherscan.io/api', keyParam: 'apikey', apiKey: process.env.OPTIMISM_ETHERSCAN_API_KEY ?? process.env.ETHERSCAN_API_KEY },
+      137: { url: 'https://api.polygonscan.com/api', keyParam: 'apikey', apiKey: process.env.POLYGONSCAN_API_KEY ?? process.env.ETHERSCAN_API_KEY },
+      8453: { url: 'https://api.basescan.org/api', keyParam: 'apikey', apiKey: process.env.BASESCAN_API_KEY ?? process.env.ETHERSCAN_API_KEY },
+      56: { url: 'https://api.bscscan.com/api', keyParam: 'apikey', apiKey: process.env.BSCSCAN_API_KEY ?? process.env.ETHERSCAN_API_KEY },
     };
 
     const explorer = explorerApis[chain as number];
@@ -487,6 +488,11 @@ export class OnChainIndexer extends RunnableBase {
           offset: '10',
           sort: 'desc',
         });
+
+        // Attach API key if available (without key, free tier = 5 req/sec)
+        if (explorer.apiKey) {
+          params.set(explorer.keyParam, explorer.apiKey);
+        }
 
         const response = await fetch(`${explorer.url}?${params.toString()}`);
         if (!response.ok) continue;

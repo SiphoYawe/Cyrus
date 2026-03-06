@@ -70,6 +70,7 @@ export interface StatArbPosition {
   combinedPnl: number;
   accumulatedFunding: number;
   marginUsed: number;
+  totalFees: number;
   readonly status: StatArbPositionStatus;
   readonly signalSource: StatArbSignalSource;
   closeReason?: StatArbExitReason;

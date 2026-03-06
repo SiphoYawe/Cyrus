@@ -21,6 +21,10 @@ import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('stat-arb-strategy');
 
+// Stat-arb trades execute on Hyperliquid perps via symbol strings, not EVM token addresses.
+// This placeholder satisfies StrategySignal.tokenPair interface — never used for on-chain execution.
+const PERP_PLACEHOLDER = tokenAddress('0x0000000000000000000000000000000000000000');
+
 // --- Constants ---
 
 export const STAT_ARB_STRATEGY_DEFAULTS = {
@@ -170,8 +174,8 @@ export class StatArbStrategy extends CrossChainStrategy {
       return {
         direction: direction as 'long' | 'short',
         tokenPair: {
-          from: { address: tokenAddress('0x0'), symbol: signal.pair.tokenA, decimals: 18 },
-          to: { address: tokenAddress('0x0'), symbol: signal.pair.tokenB, decimals: 18 },
+          from: { address: PERP_PLACEHOLDER, symbol: signal.pair.tokenA, decimals: 18 },
+          to: { address: PERP_PLACEHOLDER, symbol: signal.pair.tokenB, decimals: 18 },
         },
         sourceChain: chainId(42161), // Arbitrum
         destChain: chainId(42161),
@@ -196,8 +200,8 @@ export class StatArbStrategy extends CrossChainStrategy {
     return {
       direction: 'exit',
       tokenPair: {
-        from: { address: tokenAddress('0x0'), symbol: position.pair.tokenA, decimals: 18 },
-        to: { address: tokenAddress('0x0'), symbol: position.pair.tokenB, decimals: 18 },
+        from: { address: PERP_PLACEHOLDER, symbol: position.pair.tokenA, decimals: 18 },
+        to: { address: PERP_PLACEHOLDER, symbol: position.pair.tokenB, decimals: 18 },
       },
       sourceChain: chainId(42161),
       destChain: chainId(42161),

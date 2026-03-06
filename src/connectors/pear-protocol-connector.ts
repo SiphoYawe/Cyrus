@@ -205,10 +205,34 @@ export class PearProtocolConnector implements PearProtocolConnectorInterface {
     return pairs;
   }
 
-  private computePairCorrelation(_symbolA: string, _symbolB: string, _prices: Map<string, number>): number {
-    // Without historical price series, approximate correlation from spread stability
-    // In a full implementation, this would use historical candle data
-    return 0.8; // Conservative default
+  private computePairCorrelation(symbolA: string, symbolB: string, _prices: Map<string, number>): number {
+    // Compute correlation from spread history for this pair
+    const historyA = this.spreadHistory.get(symbolA) ?? [];
+    const historyB = this.spreadHistory.get(symbolB) ?? [];
+
+    if (historyA.length < 10 || historyB.length < 10) {
+      return 0.8; // Conservative default until enough data
+    }
+
+    // Use the shorter length to align series
+    const n = Math.min(historyA.length, historyB.length);
+    const seriesA = historyA.slice(-n);
+    const seriesB = historyB.slice(-n);
+
+    // Pearson correlation inline (avoid circular dependency on stat-arb module)
+    const meanA = seriesA.reduce((s, v) => s + v, 0) / n;
+    const meanB = seriesB.reduce((s, v) => s + v, 0) / n;
+    let num = 0, denA = 0, denB = 0;
+    for (let i = 0; i < n; i++) {
+      const dA = seriesA[i] - meanA;
+      const dB = seriesB[i] - meanB;
+      num += dA * dB;
+      denA += dA * dA;
+      denB += dB * dB;
+    }
+    const denom = Math.sqrt(denA * denB);
+    if (denom === 0) return 0;
+    return Math.max(-1, Math.min(1, num / denom));
   }
 
   async queryPositions(): Promise<PearPosition[]> {

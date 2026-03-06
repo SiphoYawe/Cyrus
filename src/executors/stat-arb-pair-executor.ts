@@ -289,6 +289,7 @@ export class StatArbPairExecutor extends BaseExecutor {
       combinedPnl: 0,
       accumulatedFunding: 0,
       marginUsed,
+      totalFees: parseFloat(longResult.fees || '0') + parseFloat(shortResult.fees || '0'),
       status: 'active',
       signalSource: sa.signalSource,
     };
@@ -520,7 +521,9 @@ export class StatArbPairExecutor extends BaseExecutor {
 
     const longRealizedPnl = (longClosePrice - pos.legA.entryPrice) * pos.legA.size * pos.leverage;
     const shortRealizedPnl = (pos.legB.entryPrice - shortClosePrice) * pos.legB.size * pos.leverage;
-    const totalRealizedPnl = longRealizedPnl + shortRealizedPnl + pos.accumulatedFunding;
+    const closeFees = parseFloat(longCloseResult.fees || '0') + parseFloat(shortCloseResult.fees || '0');
+    pos.totalFees = (pos.totalFees ?? 0) + closeFees;
+    const totalRealizedPnl = longRealizedPnl + shortRealizedPnl + pos.accumulatedFunding - pos.totalFees;
 
     // Finalize funding tracking
     this.fundingTracker.finalizeFunding(pos.positionId);
