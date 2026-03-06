@@ -2,11 +2,13 @@ import { createLogger } from '../utils/logger.js';
 import type { MarketDataService } from '../data/market-data-service.js';
 import type { OnChainIndexer } from '../data/on-chain-indexer.js';
 import type { SignalAggregator } from '../data/signal-aggregator.js';
+import type { CandleAggregator } from '../data/candle-aggregator.js';
 import type { CrossChainStrategy } from '../strategies/cross-chain-strategy.js';
 import { CrossChainArbStrategy } from '../strategies/builtin/cross-chain-arb.js';
 import { HyperliquidPerps } from '../strategies/builtin/hyperliquid-perps.js';
 import { MemeTrader } from '../strategies/builtin/meme-trader.js';
 import { MarketMaker } from '../strategies/builtin/market-maker.js';
+import { FreqtradeAdapter } from '../strategies/adapters/freqtrade-adapter.js';
 import type { ArbOpportunity } from '../strategies/builtin/cross-chain-arb.js';
 import type { PerpMarketData } from '../strategies/builtin/hyperliquid-perps.js';
 import type { DetectedSignal } from '../strategies/builtin/meme-trader.js';
@@ -18,6 +20,7 @@ export interface StrategyDataBridgeDeps {
   readonly marketDataService: MarketDataService;
   readonly onChainIndexer?: OnChainIndexer;
   readonly signalAggregator?: SignalAggregator;
+  readonly candleAggregator?: CandleAggregator;
 }
 
 /**
@@ -29,6 +32,7 @@ export class StrategyDataBridge {
   private readonly marketDataService: MarketDataService;
   private readonly onChainIndexer: OnChainIndexer | null;
   private readonly signalAggregator: SignalAggregator | null;
+  private readonly candleAggregator: CandleAggregator | null;
 
   // Track data availability for diagnostics
   private lastDataStatus = {
@@ -36,6 +40,7 @@ export class StrategyDataBridge {
     fundingRates: false,
     socialSignals: false,
     orderBook: false,
+    candleData: false,
   };
 
   constructor(deps: StrategyDataBridgeDeps) {
@@ -43,6 +48,7 @@ export class StrategyDataBridge {
     this.marketDataService = deps.marketDataService;
     this.onChainIndexer = deps.onChainIndexer ?? null;
     this.signalAggregator = deps.signalAggregator ?? null;
+    this.candleAggregator = deps.candleAggregator ?? null;
   }
 
   /**
@@ -55,6 +61,7 @@ export class StrategyDataBridge {
       this.feedHyperliquidPerps(),
       this.feedMemeTrader(),
       this.feedMarketMaker(),
+      this.feedFreqtradeAdapters(),
     ]);
 
     const failures = results.filter((r) => r.status === 'rejected');
@@ -255,6 +262,37 @@ export class StrategyDataBridge {
     } catch (err) {
       this.lastDataStatus.orderBook = false;
       logger.debug({ error: err }, 'MarketMaker data feed failed');
+    }
+  }
+
+  private async feedFreqtradeAdapters(): Promise<void> {
+    const freqStrategies = this.strategies.filter(
+      (s): s is FreqtradeAdapter => s instanceof FreqtradeAdapter,
+    );
+    if (freqStrategies.length === 0 || !this.candleAggregator) return;
+
+    try {
+      // Feed price updates into candle aggregator from market data
+      const context = await this.marketDataService.buildContext();
+      for (const [token, price] of context.prices) {
+        this.candleAggregator.update(token as string, price);
+      }
+
+      // Feed candle data to each Freqtrade strategy
+      let fed = false;
+      for (const strategy of freqStrategies) {
+        const tradeToken = strategy.getTradeToken();
+        const tokenKey = tradeToken?.symbol?.toLowerCase() ?? 'ethereum';
+        const candles = this.candleAggregator.getCandlesWithCurrent(tokenKey);
+        if (candles.length > 0) {
+          strategy.setOhlcvData(candles);
+          fed = true;
+        }
+      }
+      this.lastDataStatus.candleData = fed;
+    } catch (err) {
+      this.lastDataStatus.candleData = false;
+      logger.debug({ error: err }, 'Freqtrade candle data feed failed');
     }
   }
 }

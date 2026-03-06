@@ -47,6 +47,7 @@ describe('StrategyDataBridge', () => {
       fundingRates: false,
       socialSignals: false,
       orderBook: false,
+      candleData: false,
     });
   });
 

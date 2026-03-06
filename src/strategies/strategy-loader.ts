@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { resolve, join, basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger } from '../utils/logger.js';
@@ -7,8 +7,8 @@ import { StrategyConfigError } from '../utils/errors.js';
 
 const logger = createLogger('strategy-loader');
 
-const STRATEGY_PATTERN_TS = /extends\s+CrossChainStrategy/;
-const STRATEGY_PATTERN_JS = /CrossChainStrategy/;
+const STRATEGY_PATTERN_TS = /extends\s+(CrossChainStrategy|FreqtradeAdapter)/;
+const STRATEGY_PATTERN_JS = /(CrossChainStrategy|FreqtradeAdapter)/;
 
 const __filename_loader = fileURLToPath(import.meta.url);
 const __dirname_loader = dirname(__filename_loader);
@@ -63,34 +63,60 @@ export class StrategyLoader {
     const result = new Map<string, string>();
     const absDir = resolve(dirPath);
 
-    let entries: string[];
+    let dirEntries: string[];
     try {
-      const dirEntries = await readdir(absDir);
-      entries = dirEntries.filter((e) =>
-        (e.endsWith('.ts') || e.endsWith('.js')) &&
-        !e.endsWith('.test.ts') &&
-        !e.endsWith('.test.js') &&
-        !e.endsWith('.d.ts') &&
-        !e.endsWith('.d.ts.map') &&
-        !e.endsWith('.js.map'),
-      );
+      dirEntries = await readdir(absDir);
     } catch {
       return result;
     }
 
-    for (const entry of entries) {
-      const filePath = join(absDir, entry);
+    for (const entry of dirEntries) {
+      const fullPath = join(absDir, entry);
+
+      // Skip test directories and hidden dirs
+      if (entry === '__tests__' || entry === 'node_modules' || entry.startsWith('.')) {
+        continue;
+      }
+
+      // Recurse into subdirectories
+      try {
+        const entryStat = await stat(fullPath);
+        if (entryStat.isDirectory()) {
+          const subResult = await this.scanDirectory(fullPath);
+          for (const [name, filePath] of subResult) {
+            if (!result.has(name)) {
+              result.set(name, filePath);
+            }
+          }
+          continue;
+        }
+      } catch {
+        continue;
+      }
+
+      // Filter strategy files
+      if (
+        !(entry.endsWith('.ts') || entry.endsWith('.js')) ||
+        entry.endsWith('.test.ts') ||
+        entry.endsWith('.test.js') ||
+        entry.endsWith('.d.ts') ||
+        entry.endsWith('.d.ts.map') ||
+        entry.endsWith('.js.map')
+      ) {
+        continue;
+      }
+
       const ext = entry.endsWith('.ts') ? '.ts' : '.js';
       try {
-        const content = await readFile(filePath, 'utf-8');
+        const content = await readFile(fullPath, 'utf-8');
         const pattern = ext === '.ts' ? STRATEGY_PATTERN_TS : STRATEGY_PATTERN_JS;
         if (!pattern.test(content)) {
           continue; // fast pre-check: not a strategy file
         }
         const name = basename(entry, ext);
-        result.set(name, filePath);
+        result.set(name, fullPath);
       } catch (err) {
-        logger.warn({ file: filePath, error: (err as Error).message }, 'Failed to read strategy file');
+        logger.warn({ file: fullPath, error: (err as Error).message }, 'Failed to read strategy file');
       }
     }
 
