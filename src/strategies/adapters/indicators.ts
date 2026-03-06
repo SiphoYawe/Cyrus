@@ -197,3 +197,92 @@ export function calculateBollingerBands(
 
   return { upper, middle, lower };
 }
+
+/**
+ * Average True Range (ATR).
+ * Measures market volatility using high, low, and close prices.
+ * Uses Wilder's smoothing method (same as RSI).
+ * Returns an array of length equal to the input arrays, with NaN for insufficient data.
+ */
+export function calculateAtr(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  period: number,
+): number[] {
+  const len = highs.length;
+  const result: number[] = new Array(len).fill(NaN);
+  if (period < 1 || len < period + 1) return result;
+
+  // Calculate True Range for each bar (starting at index 1)
+  const tr: number[] = new Array(len).fill(0);
+  for (let i = 1; i < len; i++) {
+    const highLow = highs[i] - lows[i];
+    const highClose = Math.abs(highs[i] - closes[i - 1]);
+    const lowClose = Math.abs(lows[i] - closes[i - 1]);
+    tr[i] = Math.max(highLow, highClose, lowClose);
+  }
+
+  // Seed ATR with SMA of first `period` true ranges (from index 1)
+  let atr = 0;
+  for (let i = 1; i <= period; i++) {
+    atr += tr[i];
+  }
+  atr /= period;
+  result[period] = atr;
+
+  // Wilder's smoothing for subsequent values
+  for (let i = period + 1; i < len; i++) {
+    atr = (atr * (period - 1) + tr[i]) / period;
+    result[i] = atr;
+  }
+
+  return result;
+}
+
+/**
+ * Stochastic Oscillator (%K and %D).
+ * %K = (Close - Lowest Low) / (Highest High - Lowest Low) * 100
+ * %D = SMA of %K over `dPeriod` periods.
+ * Returns arrays of length equal to closes, with NaN for insufficient data.
+ */
+export function calculateStochastic(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  kPeriod: number,
+  dPeriod: number,
+): { k: number[]; d: number[] } {
+  const len = closes.length;
+  const k: number[] = new Array(len).fill(NaN);
+  const d: number[] = new Array(len).fill(NaN);
+  if (kPeriod < 1 || len < kPeriod) return { k, d };
+
+  // Calculate %K
+  for (let i = kPeriod - 1; i < len; i++) {
+    let lowestLow = Infinity;
+    let highestHigh = -Infinity;
+    for (let j = i - kPeriod + 1; j <= i; j++) {
+      if (lows[j] < lowestLow) lowestLow = lows[j];
+      if (highs[j] > highestHigh) highestHigh = highs[j];
+    }
+    const range = highestHigh - lowestLow;
+    k[i] = range === 0 ? 50 : ((closes[i] - lowestLow) / range) * 100;
+  }
+
+  // Calculate %D = SMA of %K
+  const validK = k.filter((v) => !isNaN(v));
+  if (validK.length >= dPeriod) {
+    const dSma = calculateSma(
+      k.slice(kPeriod - 1), // only valid %K values
+      dPeriod,
+    );
+    for (let i = 0; i < dSma.length; i++) {
+      if (!isNaN(dSma[i])) {
+        d[kPeriod - 1 + i] = dSma[i];
+      }
+    }
+  }
+
+  return { k, d };
+}

@@ -96,6 +96,9 @@ import { PortfolioTierEngine } from './risk/portfolio-tier-engine.js';
 import { RiskDialManager, toTierConfigs } from './risk/risk-dial.js';
 import type { RiskDialLevel } from './risk/types.js';
 
+// Data utilities
+import { CandleAggregator } from './data/candle-aggregator.js';
+
 // Startup diagnostics
 import { collectDiagnostics, logStartupBanner } from './core/startup-diagnostics.js';
 
@@ -518,7 +521,8 @@ async function main(): Promise<void> {
     );
     logger.info('Balance reconciler initialized');
 
-    // 7i-b. Strategy runner (with AI + Risk wiring)
+    // 7i-b. Strategy runner (with AI + Risk + candle aggregator wiring)
+    const candleAggregator = new CandleAggregator();
     const runner = new StrategyRunner({
       strategies,
       marketDataService,
@@ -532,6 +536,7 @@ async function main(): Promise<void> {
       circuitBreaker,
       portfolioTierEngine,
       onChainIndexer: indexerInstance,
+      candleAggregator,
     });
     strategyRunner = runner;
     strategyRunnerPromise = runner.start();

@@ -10,7 +10,10 @@ import type { DecisionReporter } from '../ai/decision-reporter.js';
 import type { DrawdownCircuitBreaker } from '../risk/circuit-breaker.js';
 import type { PortfolioTierEngine } from '../risk/portfolio-tier-engine.js';
 import type { MarketRegime, StrategyTier } from '../ai/types.js';
+import { toTierConfigs } from '../risk/risk-dial.js';
+import type { RiskDialTierAllocation, PortfolioTier } from '../risk/types.js';
 import type { OnChainIndexer } from '../data/on-chain-indexer.js';
+import type { CandleAggregator } from '../data/candle-aggregator.js';
 import { StrategyDataBridge } from './strategy-data-bridge.js';
 import { YieldHunter } from '../strategies/builtin/yield-hunter.js';
 import { LiquidStakingStrategy } from '../strategies/builtin/liquid-staking.js';
@@ -46,6 +49,7 @@ export interface StrategyRunnerDeps {
   readonly circuitBreaker?: DrawdownCircuitBreaker;
   readonly portfolioTierEngine?: PortfolioTierEngine;
   readonly onChainIndexer?: OnChainIndexer;
+  readonly candleAggregator?: CandleAggregator;
 }
 
 export class StrategyRunner extends RunnableBase {
@@ -83,6 +87,7 @@ export class StrategyRunner extends RunnableBase {
       marketDataService: deps.marketDataService,
       onChainIndexer: deps.onChainIndexer,
       signalAggregator: deps.signalAggregator,
+      candleAggregator: deps.candleAggregator,
     });
   }
 
@@ -125,6 +130,7 @@ export class StrategyRunner extends RunnableBase {
 
     // Feed strategy-specific data from data pipeline (yield, funding rates, signals, order books)
     await this.dataBridge.feedStrategies();
+    this.logger.debug({ dataStatus: this.dataBridge.getDataStatus() }, 'Data bridge feed complete');
 
     // Periodic yield data refresh for yield-dependent strategies
     await this.refreshYieldDataIfNeeded();
@@ -162,6 +168,21 @@ export class StrategyRunner extends RunnableBase {
         const signal = strategy.shouldExecute(context);
         if (!signal || signal.strength < 0.5) {
           continue;
+        }
+
+        // Tier capacity check — block new entries if strategy's tier is overweight
+        if (this.portfolioTierEngine && signal.direction !== 'exit') {
+          const tier = (DEFAULT_STRATEGY_TIERS[strategy.name] ?? 'growth') as PortfolioTier;
+          const tierConfigs = toTierConfigs({ safe: 0.5, growth: 0.3, degen: 0.15, reserve: 0.05 });
+          const snapshot = this.portfolioTierEngine.evaluate(tierConfigs);
+          const tierAlloc = snapshot.tiers.find((t) => t.tier === tier);
+          if (tierAlloc && tierAlloc.status === 'overweight') {
+            this.logger.info(
+              { strategy: strategy.name, tier, deviation: tierAlloc.deviation },
+              'Strategy blocked: tier overweight',
+            );
+            continue;
+          }
         }
 
         const plan = strategy.buildExecution(signal, context);

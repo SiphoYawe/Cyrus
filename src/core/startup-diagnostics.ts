@@ -39,6 +39,7 @@ export function collectDiagnostics(ctx: {
   hasSolana: boolean;
   wsPort: number;
   restPort: number;
+  riskDial?: number;
 }): DiagnosticReport {
   const store = Store.getInstance();
   const balances = store.getAllBalances();
@@ -65,7 +66,7 @@ export function collectDiagnostics(ctx: {
       name: 'Risk Engine',
       status: ctx.hasCircuitBreaker ? 'ACTIVE' : 'DISABLED',
       detail: ctx.hasCircuitBreaker
-        ? `risk dial: ${5}, circuit breaker: armed`
+        ? `risk dial: ${ctx.riskDial ?? 5}, circuit breaker: armed`
         : 'Not initialized',
     },
     {

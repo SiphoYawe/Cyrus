@@ -35,6 +35,8 @@ export interface DetailedHealthDeps {
   getTickCount: () => number;
   isRunning: () => boolean;
   getSocialSourceStatus?: () => SocialSourceStatus[];
+  getFeatures?: () => Record<string, string>;
+  getWarnings?: () => string[];
 }
 
 export function createDetailedHealthHandler(store: Store, deps?: DetailedHealthDeps) {
@@ -79,6 +81,8 @@ export function createDetailedHealthHandler(store: Store, deps?: DetailedHealthD
       regime: regime?.regime ?? null,
       lastDecisionAt,
       socialSources: deps?.getSocialSourceStatus?.() ?? undefined,
+      features: deps?.getFeatures?.() ?? undefined,
+      warnings: deps?.getWarnings?.() ?? undefined,
     };
 
     sendSuccess(res, data);
