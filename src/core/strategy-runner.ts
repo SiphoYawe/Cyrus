@@ -10,6 +10,8 @@ import type { DecisionReporter } from '../ai/decision-reporter.js';
 import type { DrawdownCircuitBreaker } from '../risk/circuit-breaker.js';
 import type { PortfolioTierEngine } from '../risk/portfolio-tier-engine.js';
 import type { MarketRegime, StrategyTier } from '../ai/types.js';
+import type { OnChainIndexer } from '../data/on-chain-indexer.js';
+import { StrategyDataBridge } from './strategy-data-bridge.js';
 import { YieldHunter } from '../strategies/builtin/yield-hunter.js';
 import { LiquidStakingStrategy } from '../strategies/builtin/liquid-staking.js';
 
@@ -43,6 +45,7 @@ export interface StrategyRunnerDeps {
   readonly decisionReporter?: DecisionReporter;
   readonly circuitBreaker?: DrawdownCircuitBreaker;
   readonly portfolioTierEngine?: PortfolioTierEngine;
+  readonly onChainIndexer?: OnChainIndexer;
 }
 
 export class StrategyRunner extends RunnableBase {
@@ -56,6 +59,7 @@ export class StrategyRunner extends RunnableBase {
   private readonly decisionReporter: DecisionReporter | null;
   private readonly circuitBreaker: DrawdownCircuitBreaker | null;
   private readonly portfolioTierEngine: PortfolioTierEngine | null;
+  private readonly dataBridge: StrategyDataBridge;
   private actionsEnqueued = 0;
   private strategiesEvaluated = 0;
   private lastYieldRefresh = 0;
@@ -74,6 +78,12 @@ export class StrategyRunner extends RunnableBase {
     this.decisionReporter = deps.decisionReporter ?? null;
     this.circuitBreaker = deps.circuitBreaker ?? null;
     this.portfolioTierEngine = deps.portfolioTierEngine ?? null;
+    this.dataBridge = new StrategyDataBridge({
+      strategies: deps.strategies,
+      marketDataService: deps.marketDataService,
+      onChainIndexer: deps.onChainIndexer,
+      signalAggregator: deps.signalAggregator,
+    });
   }
 
   async controlTask(): Promise<void> {
@@ -112,6 +122,9 @@ export class StrategyRunner extends RunnableBase {
         return;
       }
     }
+
+    // Feed strategy-specific data from data pipeline (yield, funding rates, signals, order books)
+    await this.dataBridge.feedStrategies();
 
     // Periodic yield data refresh for yield-dependent strategies
     await this.refreshYieldDataIfNeeded();

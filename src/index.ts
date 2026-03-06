@@ -528,6 +528,7 @@ async function main(): Promise<void> {
       decisionReporter,
       circuitBreaker,
       portfolioTierEngine,
+      onChainIndexer: indexerInstance,
     });
     strategyRunner = runner;
     strategyRunnerPromise = runner.start();
