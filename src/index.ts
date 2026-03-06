@@ -46,6 +46,9 @@ import { SocialSentinel } from './data/social-sentinel.js';
 import { SignalAggregator } from './data/signal-aggregator.js';
 import { SocialEvaluator } from './data/evaluators/social-evaluator.js';
 
+// Telegram signal consumer
+import { TelegramSignalConsumer } from './telegram/telegram-client.js';
+
 // Stat-arb pipeline
 import { HourlyPriceFeed } from './stat-arb/hourly-price-feed.js';
 import { UniverseScanner } from './stat-arb/universe-scanner.js';
@@ -183,6 +186,7 @@ async function main(): Promise<void> {
   let fundingController: RunnableBase | null = null;
   let withdrawalController: RunnableBase | null = null;
   let fundingMutex: FundingMutex | null = null;
+  let telegramConsumer: TelegramSignalConsumer | null = null;
 
   if (secrets.privateKey) {
     // 7a. Wallet setup
@@ -301,6 +305,38 @@ async function main(): Promise<void> {
       logger.error({ error: err }, 'Signal generator crashed')
     );
     logger.info('Signal generator started');
+
+    // 7g-b. Telegram signal consumer (conditional on env vars)
+    const telegramApiId = process.env.TELEGRAM_API_ID;
+    const telegramApiHash = process.env.TELEGRAM_API_HASH;
+    const telegramSession = process.env.TELEGRAM_SESSION_STRING;
+
+    if (telegramApiId && telegramApiHash && telegramSession) {
+      try {
+        const consumer = new TelegramSignalConsumer(
+          {
+            apiId: Number(telegramApiId),
+            apiHash: telegramApiHash,
+          },
+          { store, db: persistence.getDb() },
+        );
+        telegramConsumer = consumer;
+
+        // Connect and start in background
+        consumer.connect().then(() => {
+          consumer.start().catch((err) =>
+            logger.error({ error: err }, 'Telegram consumer crashed')
+          );
+          logger.info('Telegram signal consumer connected and started');
+        }).catch((err) => {
+          logger.warn({ error: (err as Error).message }, 'Telegram connection failed (non-fatal), agent continues without Telegram signals');
+        });
+      } catch (err) {
+        logger.warn({ error: (err as Error).message }, 'Telegram consumer initialization failed (non-fatal)');
+      }
+    } else {
+      logger.info('TelegramSignalConsumer: DISABLED (TELEGRAM_API_ID/TELEGRAM_API_HASH/TELEGRAM_SESSION_STRING not set)');
+    }
 
     // 7h. Strategy loading
     const strategyLoader = new StrategyLoader();
@@ -428,6 +464,7 @@ async function main(): Promise<void> {
     }
 
     // 2. Stop controllers & data pipelines
+    if (telegramConsumer) telegramConsumer.stop();
     if (fundingController) fundingController.stop();
     if (withdrawalController) withdrawalController.stop();
     if (fundingMutex) fundingMutex.forceRelease();

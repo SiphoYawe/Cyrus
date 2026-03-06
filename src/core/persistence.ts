@@ -338,6 +338,10 @@ export class PersistenceService {
 
   // --- Lifecycle ---
 
+  getDb(): Database.Database {
+    return this.db;
+  }
+
   close(): void {
     for (const unsub of this.unsubscribers) {
       unsub();
