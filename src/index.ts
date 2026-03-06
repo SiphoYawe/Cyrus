@@ -96,6 +96,9 @@ import { PortfolioTierEngine } from './risk/portfolio-tier-engine.js';
 import { RiskDialManager, toTierConfigs } from './risk/risk-dial.js';
 import type { RiskDialLevel } from './risk/types.js';
 
+// Startup diagnostics
+import { collectDiagnostics, logStartupBanner } from './core/startup-diagnostics.js';
+
 // OpenClaw gateway
 import { OpenClawPlugin } from './openclaw/plugin.js';
 import { createPortfolioTool } from './openclaw/tools/portfolio-tool.js';
@@ -569,8 +572,39 @@ async function main(): Promise<void> {
       walletAddress: wallet.account.address,
       timestamp: Date.now(),
     });
+
+    // 7l. Startup diagnostics banner
+    const diagnostics = collectDiagnostics({
+      config,
+      walletAddress: wallet.account.address,
+      strategies,
+      hasLifiConnector: true,
+      hasAiOrchestrator: aiOrchestrator !== null,
+      hasCircuitBreaker: true,
+      hasMcpClient: mcpClientManager !== null && mcpClientManager.isConnected(),
+      hasTelegram: telegramConsumer !== null,
+      hasSolana: solanaConnector !== null,
+      wsPort: restServer.boundPort,
+      restPort: restServer.boundPort,
+    });
+    logStartupBanner(diagnostics);
   } else {
     logger.warn('No CYRUS_PRIVATE_KEY set — running in monitoring-only mode (no trading)');
+
+    // Minimal diagnostics for monitoring-only mode
+    const diagnostics = collectDiagnostics({
+      config,
+      strategies: [],
+      hasLifiConnector: false,
+      hasAiOrchestrator: false,
+      hasCircuitBreaker: false,
+      hasMcpClient: false,
+      hasTelegram: false,
+      hasSolana: false,
+      wsPort: config.ws.port,
+      restPort: restServer.boundPort,
+    });
+    logStartupBanner(diagnostics);
   }
 
   // Start agent OODA loop (non-blocking — runs in background)

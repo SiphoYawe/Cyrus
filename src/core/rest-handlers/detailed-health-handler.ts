@@ -27,6 +27,8 @@ export interface DetailedHealthResponse {
   regime: string | null;
   lastDecisionAt: number | null;
   socialSources?: SocialSourceStatus[];
+  features?: Record<string, string>;
+  warnings?: string[];
 }
 
 export interface DetailedHealthDeps {
