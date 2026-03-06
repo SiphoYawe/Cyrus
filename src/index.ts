@@ -57,6 +57,8 @@ import { SignalGenerator } from './stat-arb/signal-generator.js';
 import { FundingController } from './controllers/funding-controller.js';
 import { WithdrawalController } from './controllers/withdrawal-controller.js';
 import { FundingMutex } from './controllers/funding-mutex.js';
+import { BalanceReconciler } from './controllers/balance-reconciler.js';
+import type { EvmBalanceFetcher } from './controllers/balance-reconciler.js';
 
 // Strategies
 import { StrategyLoader } from './strategies/strategy-loader.js';
@@ -336,12 +338,37 @@ async function main(): Promise<void> {
       logger.warn({ error: err }, 'Initial yield data population failed (non-fatal)');
     }
 
-    // 7i. Strategy runner
+    // 7i. Balance reconciler
+    const evmFetcher: EvmBalanceFetcher = {
+      async fetchUsdcBalance(chain, token, walletAddr) {
+        const client = wallet.getPublicClient(chain as number);
+        if (token === '0x0000000000000000000000000000000000000000') {
+          return client.getBalance({ address: walletAddr as `0x${string}` });
+        }
+        const result = await client.readContract({
+          address: token as `0x${string}`,
+          abi: [{ name: 'balanceOf', type: 'function', stateMutability: 'view', inputs: [{ name: 'account', type: 'address' }], outputs: [{ name: '', type: 'uint256' }] }],
+          functionName: 'balanceOf',
+          args: [walletAddr as `0x${string}`],
+        });
+        return result as bigint;
+      },
+    };
+
+    const balanceReconciler = new BalanceReconciler(
+      store, hlConnector, evmFetcher, wallet.account.address,
+      { reconcileIntervalTicks: 10 }, // Reconcile every 10 ticks
+      wsServer,
+    );
+    logger.info('Balance reconciler initialized');
+
+    // 7i-b. Strategy runner
     const runner = new StrategyRunner({
       strategies,
       marketDataService,
       actionQueue,
       tickIntervalMs: config.tickIntervalMs,
+      balanceReconciler,
     });
     strategyRunner = runner;
     strategyRunnerPromise = runner.start();

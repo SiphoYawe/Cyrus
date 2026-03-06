@@ -21,6 +21,10 @@ export interface BalanceReconcilerConfig {
   readonly reconcileIntervalTicks: number;
   /** Max time for reconciliation before skipping (default 10s) */
   readonly timeoutMs: number;
+  /** Auto-correct store balances after consecutive detections (default true) */
+  readonly autoCorrect: boolean;
+  /** Number of consecutive detections before auto-correction (default 2) */
+  readonly autoCorrectAfter: number;
 }
 
 const DEFAULT_CONFIG: BalanceReconcilerConfig = {
@@ -35,6 +39,8 @@ const DEFAULT_CONFIG: BalanceReconcilerConfig = {
   ],
   reconcileIntervalTicks: 1,
   timeoutMs: 10_000,
+  autoCorrect: true,
+  autoCorrectAfter: 2,
 };
 
 // --- Types ---
@@ -80,6 +86,7 @@ export class BalanceReconciler {
   private tickCount = 0;
   private lastReconciliationTimestamp = 0;
   private lastReport: ReconciliationReport | null = null;
+  private readonly pendingDiscrepancies: Map<string, number> = new Map();
 
   constructor(
     store: Store,
@@ -219,10 +226,8 @@ export class BalanceReconciler {
       chainsSkipped++;
     }
 
-    // Handle discrepancies
-    if (discrepancies.length > 0) {
-      this.handleDiscrepancies(discrepancies);
-    }
+    // Handle discrepancies (always call to clear stale pending counters)
+    this.handleDiscrepancies(discrepancies);
 
     const largestDiscrepancyPct = discrepancies.length > 0
       ? Math.max(...discrepancies.map((d) => d.percentageDiff))
@@ -345,7 +350,13 @@ export class BalanceReconciler {
   // --- Alert & Correction ---
 
   private handleDiscrepancies(discrepancies: readonly DiscrepancyReport[]): void {
+    // Track which keys were seen this cycle for clearing resolved ones
+    const seenKeys = new Set<string>();
+
     for (const d of discrepancies) {
+      const key = `${d.chainId as number}-${d.token}`;
+      seenKeys.add(key);
+
       // Log warning
       logger.warn(
         {
@@ -360,16 +371,47 @@ export class BalanceReconciler {
         'Balance discrepancy detected',
       );
 
-      // Update store to match on-chain truth
-      const storeBalance = this.store.getBalance(d.chainId, d.token);
-      this.store.setBalance(
-        d.chainId,
-        d.token,
-        d.actual,
-        Number(d.actual) / 1_000_000, // Approximate USD value
-        storeBalance?.symbol ?? 'USDC',
-        storeBalance?.decimals ?? 6,
-      );
+      // Increment consecutive detection counter
+      const count = (this.pendingDiscrepancies.get(key) ?? 0) + 1;
+      this.pendingDiscrepancies.set(key, count);
+
+      // Auto-correct after configured consecutive detections
+      if (this.config.autoCorrect && count >= this.config.autoCorrectAfter) {
+        const storeBalance = this.store.getBalance(d.chainId, d.token);
+        logger.info(
+          {
+            chainId: d.chainId,
+            token: d.token,
+            before: (storeBalance?.amount ?? 0n).toString(),
+            after: d.actual.toString(),
+            consecutiveDetections: count,
+          },
+          'Auto-correcting store balance to on-chain truth',
+        );
+
+        this.store.setBalance(
+          d.chainId,
+          d.token,
+          d.actual,
+          Number(d.actual) / 1_000_000, // Approximate USD value
+          storeBalance?.symbol ?? 'USDC',
+          storeBalance?.decimals ?? 6,
+        );
+        // Clear counter after correction
+        this.pendingDiscrepancies.delete(key);
+      }
+    }
+
+    // Clear counters for resolved discrepancies (not seen this cycle)
+    for (const key of this.pendingDiscrepancies.keys()) {
+      if (!seenKeys.has(key)) {
+        this.pendingDiscrepancies.delete(key);
+      }
+    }
+
+    // Emit event on store emitter for subscribers
+    if (discrepancies.length > 0) {
+      this.store.emitter.emit('balance_discrepancy', discrepancies);
     }
 
     // Send WebSocket notification
@@ -388,6 +430,10 @@ export class BalanceReconciler {
         timestamp: Date.now(),
       });
     }
+  }
+
+  getPendingDiscrepancies(): Map<string, number> {
+    return this.pendingDiscrepancies;
   }
 
   // --- In-Flight Deductions ---

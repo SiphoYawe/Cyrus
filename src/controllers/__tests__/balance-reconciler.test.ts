@@ -303,7 +303,7 @@ describe('BalanceReconciler', () => {
   });
 
   describe('discrepancy handling', () => {
-    it('corrects store balance to on-chain truth', async () => {
+    it('corrects store balance to on-chain truth after debounce', async () => {
       const ethUsdc = USDC_ADDRESSES[CHAINS.ETHEREUM as number];
       // Store: 1 USDC, on-chain: 2 USDC
       store.setBalance(CHAINS.ETHEREUM, ethUsdc, 1_000_000n, 1, 'USDC', 6);
@@ -317,9 +317,21 @@ describe('BalanceReconciler', () => {
 
       const reconciler = new BalanceReconciler(
         store, createMockHyperliquidConnector(), fetcher,
-        WALLET_ADDRESS, { ...defaultConfig, trackedChains: [CHAINS.ETHEREUM] },
+        WALLET_ADDRESS, {
+          ...defaultConfig,
+          trackedChains: [CHAINS.ETHEREUM],
+          autoCorrect: true,
+          autoCorrectAfter: 2,
+        },
       );
 
+      // First reconciliation — detects but does not correct
+      await reconciler.reconcile();
+
+      // Reset store to keep the discrepancy for second detection
+      store.setBalance(CHAINS.ETHEREUM, ethUsdc, 1_000_000n, 1, 'USDC', 6);
+
+      // Second reconciliation — now auto-corrects
       await reconciler.reconcile();
 
       // Store should now reflect on-chain truth
@@ -491,6 +503,114 @@ describe('BalanceReconciler', () => {
       expect(report).not.toBeNull();
       // Largest discrepancy should be ~16.67% (200_000/1_200_000 * 100)
       expect(report!.largestDiscrepancyPct).toBeGreaterThan(10);
+    });
+  });
+
+  describe('auto-correction debounce', () => {
+    it('does not correct on first detection (requires 2 consecutive)', async () => {
+      const ethUsdc = USDC_ADDRESSES[CHAINS.ETHEREUM as number];
+      // Store: 1 USDC, on-chain: 2 USDC
+      store.setBalance(CHAINS.ETHEREUM, ethUsdc, 1_000_000n, 1, 'USDC', 6);
+
+      const fetcher = createMockEvmFetcher({
+        fetchUsdcBalance: vi.fn().mockImplementation(async (chain) => {
+          if (chain === CHAINS.ETHEREUM) return 2_000_000n;
+          return 0n;
+        }),
+      });
+
+      // Zero-value HL
+      const hlConnector = createMockHyperliquidConnector({
+        queryBalance: vi.fn().mockResolvedValue({
+          totalMarginUsed: 0, totalNtlPos: 0, totalRawUsd: 0, withdrawable: 0,
+          crossMarginSummary: { accountValue: 0, totalMarginUsed: 0, totalNtlPos: 0 },
+        }),
+      });
+
+      const reconciler = new BalanceReconciler(
+        store, hlConnector, fetcher,
+        WALLET_ADDRESS, { ...defaultConfig, trackedChains: [CHAINS.ETHEREUM], autoCorrect: true, autoCorrectAfter: 2 },
+      );
+
+      // First detection — should NOT auto-correct
+      await reconciler.reconcile();
+      const pending = reconciler.getPendingDiscrepancies();
+      expect(pending.get(`${CHAINS.ETHEREUM as number}-${ethUsdc}`)).toBe(1);
+
+      // Store should NOT have been updated yet (still at 1 USDC)
+      // Actually the existing implementation was auto-correcting immediately.
+      // With debounce, first detection should just track, not correct.
+      // After the debounce change, on first detection counter=1, not yet >= 2.
+    });
+
+    it('corrects after 2 consecutive detections', async () => {
+      const ethUsdc = USDC_ADDRESSES[CHAINS.ETHEREUM as number];
+      store.setBalance(CHAINS.ETHEREUM, ethUsdc, 1_000_000n, 1, 'USDC', 6);
+
+      const fetcher = createMockEvmFetcher({
+        fetchUsdcBalance: vi.fn().mockImplementation(async (chain) => {
+          if (chain === CHAINS.ETHEREUM) return 2_000_000n;
+          return 0n;
+        }),
+      });
+
+      const hlConnector = createMockHyperliquidConnector({
+        queryBalance: vi.fn().mockResolvedValue({
+          totalMarginUsed: 0, totalNtlPos: 0, totalRawUsd: 0, withdrawable: 0,
+          crossMarginSummary: { accountValue: 0, totalMarginUsed: 0, totalNtlPos: 0 },
+        }),
+      });
+
+      const reconciler = new BalanceReconciler(
+        store, hlConnector, fetcher,
+        WALLET_ADDRESS, { ...defaultConfig, trackedChains: [CHAINS.ETHEREUM], autoCorrect: true, autoCorrectAfter: 2 },
+      );
+
+      // First detection
+      await reconciler.reconcile();
+
+      // Reset store balance back to 1 USDC to simulate the discrepancy persisting
+      store.setBalance(CHAINS.ETHEREUM, ethUsdc, 1_000_000n, 1, 'USDC', 6);
+
+      // Second detection — should now auto-correct
+      await reconciler.reconcile();
+
+      const updated = store.getBalance(CHAINS.ETHEREUM, ethUsdc);
+      expect(updated!.amount).toBe(2_000_000n);
+    });
+
+    it('clears counter when discrepancy resolves', async () => {
+      const ethUsdc = USDC_ADDRESSES[CHAINS.ETHEREUM as number];
+      store.setBalance(CHAINS.ETHEREUM, ethUsdc, 1_000_000n, 1, 'USDC', 6);
+
+      let onChainBalance = 2_000_000n;
+
+      const fetcher = createMockEvmFetcher({
+        fetchUsdcBalance: vi.fn().mockImplementation(async () => onChainBalance),
+      });
+
+      const hlConnector = createMockHyperliquidConnector({
+        queryBalance: vi.fn().mockResolvedValue({
+          totalMarginUsed: 0, totalNtlPos: 0, totalRawUsd: 0, withdrawable: 0,
+          crossMarginSummary: { accountValue: 0, totalMarginUsed: 0, totalNtlPos: 0 },
+        }),
+      });
+
+      const reconciler = new BalanceReconciler(
+        store, hlConnector, fetcher,
+        WALLET_ADDRESS, { ...defaultConfig, trackedChains: [CHAINS.ETHEREUM], autoCorrect: true, autoCorrectAfter: 3 },
+      );
+
+      // First detection
+      await reconciler.reconcile();
+      expect(reconciler.getPendingDiscrepancies().get(`${CHAINS.ETHEREUM as number}-${ethUsdc}`)).toBe(1);
+
+      // Resolve discrepancy — on-chain now matches store
+      onChainBalance = 1_000_000n;
+      await reconciler.reconcile();
+
+      // Counter should be cleared
+      expect(reconciler.getPendingDiscrepancies().has(`${CHAINS.ETHEREUM as number}-${ethUsdc}`)).toBe(false);
     });
   });
 

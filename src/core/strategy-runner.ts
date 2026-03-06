@@ -2,6 +2,7 @@ import { RunnableBase } from './runnable-base.js';
 import type { ActionQueue } from './action-queue.js';
 import type { CrossChainStrategy } from '../strategies/cross-chain-strategy.js';
 import type { MarketDataService } from '../data/market-data-service.js';
+import type { BalanceReconciler } from '../controllers/balance-reconciler.js';
 import { YieldHunter } from '../strategies/builtin/yield-hunter.js';
 import { LiquidStakingStrategy } from '../strategies/builtin/liquid-staking.js';
 
@@ -12,12 +13,14 @@ export interface StrategyRunnerDeps {
   readonly marketDataService: MarketDataService;
   readonly actionQueue: ActionQueue;
   readonly tickIntervalMs: number;
+  readonly balanceReconciler?: BalanceReconciler;
 }
 
 export class StrategyRunner extends RunnableBase {
   private readonly strategies: CrossChainStrategy[];
   private readonly marketDataService: MarketDataService;
   private readonly actionQueue: ActionQueue;
+  private readonly balanceReconciler: BalanceReconciler | null;
   private actionsEnqueued = 0;
   private strategiesEvaluated = 0;
   private lastYieldRefresh = 0;
@@ -27,12 +30,28 @@ export class StrategyRunner extends RunnableBase {
     this.strategies = deps.strategies;
     this.marketDataService = deps.marketDataService;
     this.actionQueue = deps.actionQueue;
+    this.balanceReconciler = deps.balanceReconciler ?? null;
   }
 
   async controlTask(): Promise<void> {
     if (!this.marketDataService.ready) {
       this.logger.debug('Market data service not ready, skipping tick');
       return;
+    }
+
+    // Balance reconciliation (runs at its own interval within the tick)
+    if (this.balanceReconciler) {
+      try {
+        const report = await this.balanceReconciler.reconcile();
+        if (report && report.discrepancies.length > 0) {
+          this.logger.info(
+            { discrepancies: report.discrepancies.length, largest: report.largestDiscrepancyPct },
+            'Balance discrepancies detected and corrected',
+          );
+        }
+      } catch (err) {
+        this.logger.warn({ error: err }, 'Balance reconciliation failed (non-fatal)');
+      }
     }
 
     // Periodic yield data refresh for yield-dependent strategies
