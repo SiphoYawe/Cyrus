@@ -12,9 +12,12 @@ export function createBacktestingResultsHandler(
     }
 
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-    const limit = Math.min(Number(url.searchParams.get('limit') ?? '50'), 200);
-    const offset = Number(url.searchParams.get('offset') ?? '0');
-    const strategy = url.searchParams.get('strategy') ?? undefined;
+    const rawLimit = Number(url.searchParams.get('limit') ?? '50');
+    const rawOffset = Number(url.searchParams.get('offset') ?? '0');
+
+    const limit = Math.max(1, Math.min(Number.isFinite(rawLimit) ? rawLimit : 50, 200));
+    const offset = Math.max(0, Number.isFinite(rawOffset) ? rawOffset : 0);
+    const strategy = url.searchParams.get('strategy') || undefined;
 
     const results = persistence.getBacktestResults(limit, offset, strategy);
     sendSuccess(res, results);

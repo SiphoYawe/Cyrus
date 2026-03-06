@@ -135,6 +135,8 @@ export class FundingController extends RunnableBase {
   }
 
   private async evaluateAndEmit(pendingSignals: StatArbSignal[]): Promise<void> {
+    let emittedAnyBatch = false;
+
     for (const signal of pendingSignals) {
       // Skip if we already have an active funding batch for this signal
       if (this.hasBatchForSignal(signal.signalId)) continue;
@@ -163,6 +165,11 @@ export class FundingController extends RunnableBase {
 
       const batch = this.createBatch(signal.signalId, request.deficit, plans);
       this.emitFundingActions(batch);
+      emittedAnyBatch = true;
+    }
+
+    // Set cooldown once per cycle, not per batch
+    if (emittedAnyBatch) {
       this.lastFundingCycleTime = Date.now();
     }
   }

@@ -21,6 +21,10 @@ import { createWalletSetup } from './utils/wallet.js';
 import { LiFiConnector } from './connectors/lifi-connector.js';
 import { HyperliquidConnector } from './connectors/hyperliquid-connector.js';
 import { PearProtocolConnector } from './connectors/pear-protocol-connector.js';
+import { SolanaConnector } from './connectors/solana-connector.js';
+import { JupiterClient } from './connectors/jupiter-client.js';
+import { SOLANA_CHAIN_ID, WRAPPED_SOL_MINT } from './connectors/solana-types.js';
+import { chainId, tokenAddress } from './core/types.js';
 
 // Utility executors
 import { ApprovalHandler } from './executors/approval-handler.js';
@@ -187,6 +191,9 @@ async function main(): Promise<void> {
   let withdrawalController: RunnableBase | null = null;
   let fundingMutex: FundingMutex | null = null;
   let telegramConsumer: TelegramSignalConsumer | null = null;
+  let telegramConsumerPromise: Promise<void> | null = null;
+  let solanaConnector: SolanaConnector | null = null;
+  let jupiterClient: JupiterClient | null = null;
 
   if (secrets.privateKey) {
     // 7a. Wallet setup
@@ -322,12 +329,10 @@ async function main(): Promise<void> {
         );
         telegramConsumer = consumer;
 
-        // Connect and start in background
-        consumer.connect().then(() => {
-          consumer.start().catch((err) =>
-            logger.error({ error: err }, 'Telegram consumer crashed')
-          );
+        // Connect and start in background — track promise for graceful shutdown
+        telegramConsumerPromise = consumer.connect().then(() => {
           logger.info('Telegram signal consumer connected and started');
+          return consumer.start();
         }).catch((err) => {
           logger.warn({ error: (err as Error).message }, 'Telegram connection failed (non-fatal), agent continues without Telegram signals');
         });
@@ -464,7 +469,10 @@ async function main(): Promise<void> {
     }
 
     // 2. Stop controllers & data pipelines
-    if (telegramConsumer) telegramConsumer.stop();
+    if (telegramConsumer) {
+      telegramConsumer.stop();
+      if (telegramConsumerPromise) await telegramConsumerPromise;
+    }
     if (fundingController) fundingController.stop();
     if (withdrawalController) withdrawalController.stop();
     if (fundingMutex) fundingMutex.forceRelease();
