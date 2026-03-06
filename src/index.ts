@@ -53,6 +53,11 @@ import { HyperliquidOrderManager } from './connectors/hyperliquid-order-manager.
 import { FundingRateTracker } from './stat-arb/funding-rate-tracker.js';
 import { SignalGenerator } from './stat-arb/signal-generator.js';
 
+// Controllers
+import { FundingController } from './controllers/funding-controller.js';
+import { WithdrawalController } from './controllers/withdrawal-controller.js';
+import { FundingMutex } from './controllers/funding-mutex.js';
+
 // Strategies
 import { StrategyLoader } from './strategies/strategy-loader.js';
 import { StrategyRunner } from './core/strategy-runner.js';
@@ -173,6 +178,9 @@ async function main(): Promise<void> {
   let socialSentinel: RunnableBase | null = null;
   let signalGenerator: RunnableBase | null = null;
   let strategyRunnerPromise: Promise<void> | null = null;
+  let fundingController: RunnableBase | null = null;
+  let withdrawalController: RunnableBase | null = null;
+  let fundingMutex: FundingMutex | null = null;
 
   if (secrets.privateKey) {
     // 7a. Wallet setup
@@ -342,7 +350,31 @@ async function main(): Promise<void> {
       'Strategy runner started'
     );
 
-    // 7j. Notify dashboard
+    // 7j. Funding & Withdrawal controllers (conditional on Hyperliquid config)
+    if (process.env.HYPERLIQUID_WALLET_ADDRESS || hlConnector) {
+      fundingMutex = new FundingMutex();
+
+      const fc = new FundingController(store, actionQueue, undefined, fundingMutex);
+      fundingController = fc;
+      fc.start().catch((err) =>
+        logger.error({ error: err }, 'Funding controller crashed')
+      );
+      logger.info('Funding controller started');
+
+      const wc = new WithdrawalController(
+        store, actionQueue, hlConnector, undefined, fundingMutex,
+      );
+      withdrawalController = wc;
+      wc.start().catch((err) =>
+        logger.error({ error: err }, 'Withdrawal controller crashed')
+      );
+      logger.info('Withdrawal controller started');
+    } else {
+      logger.info('FundingController: DISABLED (no Hyperliquid config)');
+      logger.info('WithdrawalController: DISABLED (no Hyperliquid config)');
+    }
+
+    // 7k. Notify dashboard
     wsServer.emitAgentEvent('AGENT_STARTED', {
       mode: config.mode,
       strategies: strategies.map((s) => s.name),
@@ -368,7 +400,10 @@ async function main(): Promise<void> {
       if (strategyRunnerPromise) await strategyRunnerPromise;
     }
 
-    // 2. Stop data pipelines
+    // 2. Stop controllers & data pipelines
+    if (fundingController) fundingController.stop();
+    if (withdrawalController) withdrawalController.stop();
+    if (fundingMutex) fundingMutex.forceRelease();
     if (signalGenerator) signalGenerator.stop();
     if (chainScout) chainScout.stop();
     if (onChainIndexer) onChainIndexer.stop();

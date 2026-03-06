@@ -11,6 +11,7 @@ import type { FundingBridgeAction } from '../core/action-types.js';
 import type { ChainId, TokenAddress } from '../core/types.js';
 import { chainId } from '../core/types.js';
 import { CHAINS, USDC_ADDRESSES } from '../core/constants.js';
+import type { FundingMutex } from './funding-mutex.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('funding-controller');
@@ -88,18 +89,21 @@ export class FundingController extends RunnableBase {
   private readonly actionQueue: ActionQueue;
   private readonly config: FundingControllerConfig;
   private readonly activeBatches: Map<string, FundingBatch> = new Map();
+  private readonly mutex: FundingMutex | null;
   private lastFundingCycleTime = 0;
 
   constructor(
     store: Store,
     actionQueue: ActionQueue,
     config?: Partial<FundingControllerConfig>,
+    mutex?: FundingMutex,
   ) {
     const merged = { ...DEFAULT_CONFIG, ...config };
     super(merged.tickIntervalMs, 'funding-controller');
     this.store = store;
     this.actionQueue = actionQueue;
     this.config = merged;
+    this.mutex = mutex ?? null;
   }
 
   async controlTask(): Promise<void> {
@@ -117,6 +121,20 @@ export class FundingController extends RunnableBase {
     const pendingSignals = this.store.getPendingSignals();
     if (pendingSignals.length === 0) return;
 
+    // Acquire mutex if present (prevents conflicting with withdrawal controller)
+    if (this.mutex && !this.mutex.acquire('funding')) {
+      logger.debug('Withdrawal in progress, skipping funding evaluation');
+      return;
+    }
+
+    try {
+      await this.evaluateAndEmit(pendingSignals);
+    } finally {
+      this.mutex?.release('funding');
+    }
+  }
+
+  private async evaluateAndEmit(pendingSignals: StatArbSignal[]): Promise<void> {
     for (const signal of pendingSignals) {
       // Skip if we already have an active funding batch for this signal
       if (this.hasBatchForSignal(signal.signalId)) continue;
@@ -150,6 +168,7 @@ export class FundingController extends RunnableBase {
   }
 
   async onStop(): Promise<void> {
+    this.mutex?.release('funding');
     logger.info(
       { activeBatches: this.activeBatches.size },
       'FundingController stopping',

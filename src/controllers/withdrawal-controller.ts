@@ -9,6 +9,7 @@ import type { HyperliquidConnectorInterface } from '../connectors/hyperliquid-co
 import type { WithdrawalAction, WithdrawalReason } from '../core/action-types.js';
 import type { ChainId, TokenAddress } from '../core/types.js';
 import { CHAINS, USDC_ADDRESSES } from '../core/constants.js';
+import type { FundingMutex } from './funding-mutex.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('withdrawal-controller');
@@ -70,6 +71,7 @@ export class WithdrawalController extends RunnableBase {
   private readonly hyperliquidConnector: HyperliquidConnectorInterface;
   private readonly config: WithdrawalControllerConfig;
   private readonly pendingRequests: WithdrawalRequest[] = [];
+  private readonly mutex: FundingMutex | null;
   private dailyWithdrawn: bigint = 0n;
   private dailyResetTimestamp: number = 0;
 
@@ -78,6 +80,7 @@ export class WithdrawalController extends RunnableBase {
     actionQueue: ActionQueue,
     hyperliquidConnector: HyperliquidConnectorInterface,
     config?: Partial<WithdrawalControllerConfig>,
+    mutex?: FundingMutex,
   ) {
     const merged = { ...DEFAULT_CONFIG, ...config };
     super(merged.tickIntervalMs, 'withdrawal-controller');
@@ -85,6 +88,7 @@ export class WithdrawalController extends RunnableBase {
     this.actionQueue = actionQueue;
     this.hyperliquidConnector = hyperliquidConnector;
     this.config = merged;
+    this.mutex = mutex ?? null;
   }
 
   async controlTask(): Promise<void> {
@@ -92,21 +96,32 @@ export class WithdrawalController extends RunnableBase {
 
     if (this.pendingRequests.length === 0) return;
 
-    // Process one request at a time
-    const request = this.pendingRequests[0];
-    const plan = await this.evaluateWithdrawal(request);
-
-    if (!plan) {
-      // Remove invalid request
-      this.pendingRequests.shift();
+    // Acquire mutex if present (prevents conflicting with funding controller)
+    if (this.mutex && !this.mutex.acquire('withdrawal')) {
+      logger.debug('Funding in progress, skipping withdrawal evaluation');
       return;
     }
 
-    this.emitWithdrawalAction(plan);
-    this.pendingRequests.shift();
+    try {
+      // Process one request at a time
+      const request = this.pendingRequests[0];
+      const plan = await this.evaluateWithdrawal(request);
+
+      if (!plan) {
+        // Remove invalid request
+        this.pendingRequests.shift();
+        return;
+      }
+
+      this.emitWithdrawalAction(plan);
+      this.pendingRequests.shift();
+    } finally {
+      this.mutex?.release('withdrawal');
+    }
   }
 
   async onStop(): Promise<void> {
+    this.mutex?.release('withdrawal');
     logger.info(
       { pendingRequests: this.pendingRequests.length },
       'WithdrawalController stopping',
