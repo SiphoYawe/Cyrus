@@ -198,6 +198,13 @@ export interface ExecutionPlan {
   readonly metadata: Record<string, unknown>;
 }
 
+// Composite signal from multi-evaluator scoring
+export interface CompositeSignalSnapshot {
+  readonly score: number;
+  readonly trend: 'rising' | 'falling' | 'flat';
+  readonly confidence: 'high' | 'medium' | 'low';
+}
+
 // Strategy context — snapshot of agent state passed to strategies each tick
 export interface StrategyContext {
   readonly timestamp: number;
@@ -207,6 +214,7 @@ export interface StrategyContext {
   readonly activeTransfers: readonly InFlightTransfer[];
   readonly microstructure?: import('../data/market-data-types.js').MarketMicrostructure;
   readonly onChainData?: readonly import('../data/on-chain-types.js').ConcreteOnChainEvent[];
+  readonly compositeSignal?: CompositeSignalSnapshot;
 }
 
 // Risk parameters — declarative risk config per strategy

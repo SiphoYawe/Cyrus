@@ -3,6 +3,7 @@ import type { ActionQueue } from './action-queue.js';
 import type { CrossChainStrategy } from '../strategies/cross-chain-strategy.js';
 import type { MarketDataService } from '../data/market-data-service.js';
 import type { BalanceReconciler } from '../controllers/balance-reconciler.js';
+import type { SignalAggregator } from '../data/signal-aggregator.js';
 import { YieldHunter } from '../strategies/builtin/yield-hunter.js';
 import { LiquidStakingStrategy } from '../strategies/builtin/liquid-staking.js';
 
@@ -14,6 +15,7 @@ export interface StrategyRunnerDeps {
   readonly actionQueue: ActionQueue;
   readonly tickIntervalMs: number;
   readonly balanceReconciler?: BalanceReconciler;
+  readonly signalAggregator?: SignalAggregator;
 }
 
 export class StrategyRunner extends RunnableBase {
@@ -21,6 +23,7 @@ export class StrategyRunner extends RunnableBase {
   private readonly marketDataService: MarketDataService;
   private readonly actionQueue: ActionQueue;
   private readonly balanceReconciler: BalanceReconciler | null;
+  private readonly signalAggregator: SignalAggregator | null;
   private actionsEnqueued = 0;
   private strategiesEvaluated = 0;
   private lastYieldRefresh = 0;
@@ -31,6 +34,7 @@ export class StrategyRunner extends RunnableBase {
     this.marketDataService = deps.marketDataService;
     this.actionQueue = deps.actionQueue;
     this.balanceReconciler = deps.balanceReconciler ?? null;
+    this.signalAggregator = deps.signalAggregator ?? null;
   }
 
   async controlTask(): Promise<void> {
@@ -57,7 +61,17 @@ export class StrategyRunner extends RunnableBase {
     // Periodic yield data refresh for yield-dependent strategies
     await this.refreshYieldDataIfNeeded();
 
-    const context = await this.marketDataService.buildContext();
+    const baseContext = await this.marketDataService.buildContext();
+
+    // Enrich context with composite signal from SignalAggregator (if available)
+    let context = baseContext;
+    if (this.signalAggregator) {
+      // Use a generic "portfolio" token key for the composite signal snapshot
+      const compositeSignal = this.signalAggregator.getScoreWithTrend('portfolio') ?? undefined;
+      if (compositeSignal) {
+        context = Object.freeze({ ...baseContext, compositeSignal });
+      }
+    }
 
     for (const strategy of this.strategies) {
       try {

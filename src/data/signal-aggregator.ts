@@ -12,13 +12,23 @@ import type {
   SignalRecommendation,
   RecommendationThresholds,
 } from './signal-types.js';
+import type { CompositeSignalSnapshot } from '../core/types.js';
 
 const logger = createLogger('signal-aggregator');
+
+const MAX_HISTORY_ENTRIES = 60;
+const TREND_WINDOW = 10;
+
+export interface ScoreHistoryEntry {
+  readonly score: number;
+  readonly timestamp: number;
+}
 
 export class SignalAggregator {
   private readonly evaluators = new Map<string, Evaluator>();
   private readonly defaultWeights: EvaluatorWeightConfig;
   private readonly thresholds: RecommendationThresholds;
+  private readonly scoreHistory = new Map<string, ScoreHistoryEntry[]>();
 
   constructor(
     defaultWeights: EvaluatorWeightConfig = DEFAULT_WEIGHTS,
@@ -116,7 +126,7 @@ export class SignalAggregator {
       (weightedConfidence / totalWeight) * successRatio,
     ));
 
-    return {
+    const result: CompositeScore = {
       overallScore: compositeScore,
       aggregateConfidence,
       recommendation: this.getRecommendation(compositeScore),
@@ -124,6 +134,75 @@ export class SignalAggregator {
       timestamp: context.timestamp,
       token: context.token,
     };
+
+    // Track score history for trend analysis
+    this.appendScoreHistory(context.token, compositeScore, context.timestamp);
+
+    return result;
+  }
+
+  getScoreWithTrend(token: string): CompositeSignalSnapshot | null {
+    const history = this.scoreHistory.get(token);
+    if (!history || history.length === 0) return null;
+
+    const latest = history[history.length - 1]!;
+    const trend = this.computeTrend(history);
+    const confidence = this.computeConfidenceLevel();
+
+    return {
+      score: latest.score,
+      trend,
+      confidence,
+    };
+  }
+
+  getScoreHistory(token: string): readonly ScoreHistoryEntry[] {
+    return this.scoreHistory.get(token) ?? [];
+  }
+
+  private appendScoreHistory(token: string, score: number, timestamp: number): void {
+    let history = this.scoreHistory.get(token);
+    if (!history) {
+      history = [];
+      this.scoreHistory.set(token, history);
+    }
+
+    history.push({ score, timestamp });
+
+    // Keep at most MAX_HISTORY_ENTRIES
+    while (history.length > MAX_HISTORY_ENTRIES) {
+      history.shift();
+    }
+  }
+
+  private computeTrend(history: ScoreHistoryEntry[]): 'rising' | 'falling' | 'flat' {
+    if (history.length < 2) return 'flat';
+
+    const windowSize = Math.min(TREND_WINDOW, history.length);
+    const window = history.slice(-windowSize);
+
+    // Count rising vs falling transitions
+    let risingCount = 0;
+    let fallingCount = 0;
+
+    for (let i = 1; i < window.length; i++) {
+      const diff = window[i]!.score - window[i - 1]!.score;
+      if (diff > 0.001) risingCount++;
+      else if (diff < -0.001) fallingCount++;
+    }
+
+    const transitions = window.length - 1;
+    // If >60% of transitions are in one direction, declare that trend
+    if (risingCount > transitions * 0.6) return 'rising';
+    if (fallingCount > transitions * 0.6) return 'falling';
+    return 'flat';
+  }
+
+  private computeConfidenceLevel(): 'high' | 'medium' | 'low' {
+    const totalRegistered = this.evaluators.size;
+    if (totalRegistered >= 4) return 'high';
+    if (totalRegistered === 3) return 'medium';
+    return 'low';
   }
 
   getRecommendation(score: number, thresholds?: RecommendationThresholds): SignalRecommendation {
