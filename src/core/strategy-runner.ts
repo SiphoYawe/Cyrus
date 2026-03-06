@@ -4,10 +4,32 @@ import type { CrossChainStrategy } from '../strategies/cross-chain-strategy.js';
 import type { MarketDataService } from '../data/market-data-service.js';
 import type { BalanceReconciler } from '../controllers/balance-reconciler.js';
 import type { SignalAggregator } from '../data/signal-aggregator.js';
+import type { AIOrchestrator } from '../ai/ai-orchestrator.js';
+import type { StrategySelector, StrategyMetadata } from '../ai/strategy-selector.js';
+import type { DecisionReporter } from '../ai/decision-reporter.js';
+import type { DrawdownCircuitBreaker } from '../risk/circuit-breaker.js';
+import type { PortfolioTierEngine } from '../risk/portfolio-tier-engine.js';
+import type { MarketRegime, StrategyTier } from '../ai/types.js';
 import { YieldHunter } from '../strategies/builtin/yield-hunter.js';
 import { LiquidStakingStrategy } from '../strategies/builtin/liquid-staking.js';
 
 const YIELD_REFRESH_INTERVAL_MS = 5 * 60_000; // 5 minutes
+const REGIME_CLASSIFICATION_INTERVAL = 10; // classify every N ticks
+
+// Default strategy-to-tier mapping for known built-in strategies
+const DEFAULT_STRATEGY_TIERS: Record<string, StrategyTier> = {
+  YieldHunter: 'yield',
+  LiquidStakingStrategy: 'yield',
+  CrossChainArbStrategy: 'growth',
+  HyperliquidPerpsStrategy: 'degen',
+  StatArbStrategy: 'growth',
+  MemeTraderStrategy: 'degen',
+  PearPairTrader: 'growth',
+  MarketMakerStrategy: 'safe',
+  BollingerBounce: 'growth',
+  MacdCrossover: 'growth',
+  RsiMeanReversion: 'safe',
+};
 
 export interface StrategyRunnerDeps {
   readonly strategies: CrossChainStrategy[];
@@ -16,6 +38,11 @@ export interface StrategyRunnerDeps {
   readonly tickIntervalMs: number;
   readonly balanceReconciler?: BalanceReconciler;
   readonly signalAggregator?: SignalAggregator;
+  readonly aiOrchestrator?: AIOrchestrator;
+  readonly strategySelector?: StrategySelector;
+  readonly decisionReporter?: DecisionReporter;
+  readonly circuitBreaker?: DrawdownCircuitBreaker;
+  readonly portfolioTierEngine?: PortfolioTierEngine;
 }
 
 export class StrategyRunner extends RunnableBase {
@@ -24,9 +51,16 @@ export class StrategyRunner extends RunnableBase {
   private readonly actionQueue: ActionQueue;
   private readonly balanceReconciler: BalanceReconciler | null;
   private readonly signalAggregator: SignalAggregator | null;
+  private readonly aiOrchestrator: AIOrchestrator | null;
+  private readonly strategySelector: StrategySelector | null;
+  private readonly decisionReporter: DecisionReporter | null;
+  private readonly circuitBreaker: DrawdownCircuitBreaker | null;
+  private readonly portfolioTierEngine: PortfolioTierEngine | null;
   private actionsEnqueued = 0;
   private strategiesEvaluated = 0;
   private lastYieldRefresh = 0;
+  private currentRegime: MarketRegime = 'crab';
+  private deactivatedStrategies: Set<string> = new Set();
 
   constructor(deps: StrategyRunnerDeps) {
     super(deps.tickIntervalMs, 'strategy-runner');
@@ -35,6 +69,11 @@ export class StrategyRunner extends RunnableBase {
     this.actionQueue = deps.actionQueue;
     this.balanceReconciler = deps.balanceReconciler ?? null;
     this.signalAggregator = deps.signalAggregator ?? null;
+    this.aiOrchestrator = deps.aiOrchestrator ?? null;
+    this.strategySelector = deps.strategySelector ?? null;
+    this.decisionReporter = deps.decisionReporter ?? null;
+    this.circuitBreaker = deps.circuitBreaker ?? null;
+    this.portfolioTierEngine = deps.portfolioTierEngine ?? null;
   }
 
   async controlTask(): Promise<void> {
@@ -58,6 +97,22 @@ export class StrategyRunner extends RunnableBase {
       }
     }
 
+    // Regime classification (throttled to every N ticks to avoid excessive API calls)
+    await this.classifyRegimeIfNeeded();
+
+    // Circuit breaker check — block ALL new entries on drawdown breach
+    if (this.circuitBreaker && this.portfolioTierEngine) {
+      const { totalValueUsd } = this.portfolioTierEngine.calculateTotalPortfolioValue();
+      this.circuitBreaker.evaluate(totalValueUsd);
+      if (this.circuitBreaker.shouldRejectEntry()) {
+        this.logger.warn(
+          { reason: this.circuitBreaker.getRejectionReason() },
+          'Circuit breaker ACTIVE — blocking all new entries',
+        );
+        return;
+      }
+    }
+
     // Periodic yield data refresh for yield-dependent strategies
     await this.refreshYieldDataIfNeeded();
 
@@ -74,6 +129,15 @@ export class StrategyRunner extends RunnableBase {
     }
 
     for (const strategy of this.strategies) {
+      // Skip strategies deactivated by regime-based selection
+      if (this.deactivatedStrategies.has(strategy.name)) {
+        this.logger.debug(
+          { strategy: strategy.name, regime: this.currentRegime },
+          'Strategy deactivated for current regime, skipping',
+        );
+        continue;
+      }
+
       try {
         await strategy.onLoopStart(context.timestamp);
 
@@ -109,6 +173,13 @@ export class StrategyRunner extends RunnableBase {
           'Strategy produced actions'
         );
         this.strategiesEvaluated++;
+
+        // Generate decision report (fire-and-forget, don't delay the loop)
+        if (this.decisionReporter) {
+          this.generateDecisionReport(strategy.name, signal, plan).catch((err) => {
+            this.logger.debug({ error: err }, 'Decision report generation failed (non-fatal)');
+          });
+        }
       } catch (error) {
         this.logger.error(
           { strategy: strategy.name, error },
@@ -116,6 +187,77 @@ export class StrategyRunner extends RunnableBase {
         );
       }
     }
+  }
+
+  /**
+   * Classify market regime via AIOrchestrator (throttled).
+   * Updates regime-based strategy activation/deactivation.
+   */
+  private async classifyRegimeIfNeeded(): Promise<void> {
+    if (!this.aiOrchestrator || !this.strategySelector) return;
+    if (this.tickCount % REGIME_CLASSIFICATION_INTERVAL !== 0) return;
+
+    try {
+      const snapshot = await this.marketDataService.getMarketSnapshot();
+      const classification = await this.aiOrchestrator.classifyMarketRegime(snapshot);
+      this.currentRegime = classification.regime;
+
+      // Build strategy metadata for selector
+      const metadata: StrategyMetadata[] = this.strategies.map((s) => ({
+        name: s.name,
+        tier: DEFAULT_STRATEGY_TIERS[s.name] ?? 'growth',
+        isActive: !this.deactivatedStrategies.has(s.name),
+      }));
+
+      const selection = this.strategySelector.selectStrategies(classification.regime, metadata);
+
+      // Apply activation/deactivation
+      for (const name of selection.deactivate) {
+        this.deactivatedStrategies.add(name);
+      }
+      for (const name of selection.activate) {
+        this.deactivatedStrategies.delete(name);
+      }
+
+      if (selection.activate.length > 0 || selection.deactivate.length > 0) {
+        this.logger.info(
+          {
+            regime: classification.regime,
+            confidence: classification.confidence,
+            activated: selection.activate,
+            deactivated: selection.deactivate,
+          },
+          'Regime-based strategy selection updated',
+        );
+      }
+    } catch (err) {
+      this.logger.warn({ error: err }, 'Regime classification failed (non-fatal), using last known regime');
+    }
+  }
+
+  /**
+   * Generate a decision report for a strategy action (fire-and-forget).
+   */
+  private async generateDecisionReport(
+    strategyName: string,
+    signal: { direction: string; strength: number },
+    plan: { actions: readonly unknown[] },
+  ): Promise<void> {
+    if (!this.decisionReporter) return;
+
+    const context = {
+      regime: this.currentRegime,
+      actionType: signal.direction,
+      fromChain: 0,
+      toChain: 0,
+      tokenSymbol: 'UNKNOWN',
+      amountUsd: 0,
+      gasCostUsd: 0,
+      bridgeFeeUsd: 0,
+      slippage: 0.005,
+    };
+
+    await this.decisionReporter.generateReport(strategyName, context);
   }
 
   private async refreshYieldDataIfNeeded(): Promise<void> {

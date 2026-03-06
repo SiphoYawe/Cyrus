@@ -25,7 +25,10 @@ import {
   createActionsDenyHandler,
 } from './rest-handlers/actions-handler.js';
 import { createBacktestingResultsHandler } from './rest-handlers/backtesting-handler.js';
+import { createCommandsHandler } from './rest-handlers/commands-handler.js';
 import type { OpenClawPlugin } from '../openclaw/plugin.js';
+import type { NLCommandProcessor } from '../ai/nl-command-processor.js';
+import type { ExecutionPreview } from '../ai/execution-preview.js';
 
 const logger = createLogger('rest-server');
 
@@ -185,6 +188,11 @@ export class AgentRestServer {
     if (this.configManager) {
       this.routes.set('/api/config', createConfigHandler(this.configManager, wsServer));
     }
+  }
+
+  /** Wire NL command processor + execution preview for POST /api/commands */
+  setNLCommandProcessor(nlProcessor: NLCommandProcessor, preview?: ExecutionPreview): void {
+    this.routes.set('/api/commands', createCommandsHandler(nlProcessor, preview));
   }
 
   /** Returns the actual bound port (useful when started with port 0). */

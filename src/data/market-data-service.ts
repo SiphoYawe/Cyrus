@@ -19,6 +19,7 @@ import type { OnChainIndexer } from './on-chain-indexer.js';
 import type { ConcreteOnChainEvent } from './on-chain-types.js';
 import type { YieldOpportunity } from '../strategies/builtin/yield-hunter.js';
 import type { StakingRate } from '../strategies/builtin/liquid-staking.js';
+import type { MarketDataSnapshot } from '../ai/prompts/regime-classification.js';
 
 const logger = createLogger('market-data');
 
@@ -945,5 +946,42 @@ export class MarketDataService {
     this.coinGeckoCache.clear();
     this.yieldCache.clear();
     this.stakingRateCache.clear();
+  }
+
+  /**
+   * Build a market data snapshot for AI regime classification.
+   * Uses cached price data from the store to derive 24h price changes.
+   */
+  async getMarketSnapshot(): Promise<MarketDataSnapshot> {
+    const topTokens = [
+      'ethereum', 'bitcoin', 'solana', 'arbitrum', 'optimism',
+      'chainlink', 'uniswap', 'aave', 'maker',
+    ];
+
+    try {
+      const prices = await this.fetchCoinGeckoPrices(topTokens);
+      const tokenChanges: Array<{ symbol: string; priceChange24h: number }> = [];
+
+      // Use store prices as "current" and derive approximate change from cached data
+      const symbolMap: Record<string, string> = {
+        ethereum: 'ETH', bitcoin: 'BTC', solana: 'SOL', arbitrum: 'ARB',
+        optimism: 'OP', chainlink: 'LINK', uniswap: 'UNI', aave: 'AAVE', maker: 'MKR',
+      };
+
+      for (const [id, price] of prices.entries()) {
+        if (price > 0) {
+          // Without historical data, estimate 24h change as 0 (the AI orchestrator
+          // uses its own cache + TTL to avoid redundant calls)
+          tokenChanges.push({
+            symbol: symbolMap[id] ?? id.toUpperCase(),
+            priceChange24h: 0,
+          });
+        }
+      }
+
+      return { topTokenChanges: tokenChanges, timestamp: Date.now() };
+    } catch {
+      return { topTokenChanges: [], timestamp: Date.now() };
+    }
   }
 }

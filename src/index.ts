@@ -49,6 +49,9 @@ import { OnChainIndexer } from './data/on-chain-indexer.js';
 import { SocialSentinel } from './data/social-sentinel.js';
 import { SignalAggregator } from './data/signal-aggregator.js';
 import { SocialEvaluator } from './data/evaluators/social-evaluator.js';
+import { MarketEvaluator } from './data/evaluators/market-evaluator.js';
+import { OnChainEvaluator } from './data/evaluators/on-chain-evaluator.js';
+import { TechnicalEvaluator } from './data/evaluators/technical-evaluator.js';
 
 // Telegram signal consumer
 import { TelegramSignalConsumer } from './telegram/telegram-client.js';
@@ -76,6 +79,22 @@ import { LiquidStakingStrategy } from './strategies/builtin/liquid-staking.js';
 
 // Types
 import type { RunnableBase } from './core/runnable-base.js';
+
+// AI orchestrator & MCP
+import { MCPClientManager } from './ai/mcp-client-manager.js';
+import { AIOrchestrator } from './ai/ai-orchestrator.js';
+import { StrategySelector } from './ai/strategy-selector.js';
+import { NLCommandProcessor } from './ai/nl-command-processor.js';
+import { DecisionReporter } from './ai/decision-reporter.js';
+import { ExecutionPreview } from './ai/execution-preview.js';
+import { ConfirmationManager } from './ai/confirmation-manager.js';
+import { ErrorRecoveryManager } from './ai/error-recovery-manager.js';
+
+// Risk management
+import { DrawdownCircuitBreaker } from './risk/circuit-breaker.js';
+import { PortfolioTierEngine } from './risk/portfolio-tier-engine.js';
+import { RiskDialManager, toTierConfigs } from './risk/risk-dial.js';
+import type { RiskDialLevel } from './risk/types.js';
 
 // OpenClaw gateway
 import { OpenClawPlugin } from './openclaw/plugin.js';
@@ -194,6 +213,10 @@ async function main(): Promise<void> {
   let telegramConsumerPromise: Promise<void> | null = null;
   let solanaConnector: SolanaConnector | null = null;
   let jupiterClient: JupiterClient | null = null;
+  let mcpClientManager: MCPClientManager | null = null;
+  let aiOrchestrator: AIOrchestrator | null = null;
+  let confirmationManager: ConfirmationManager | null = null;
+  let errorRecoveryManager: ErrorRecoveryManager | null = null;
 
   if (secrets.privateKey) {
     // 7a. Wallet setup
@@ -205,6 +228,49 @@ async function main(): Promise<void> {
 
     // 7b. Connectors
     const lifiConnector = new LiFiConnector({ apiKey: secrets.lifiApiKey });
+
+    // 7b-i. MCP Client Manager + AI Orchestrator
+    try {
+      const mcp = new MCPClientManager({ connector: lifiConnector });
+      await mcp.connect();
+      mcpClientManager = mcp;
+
+      const orchestratorInstance = new AIOrchestrator();
+      orchestratorInstance.setMCPClientManager(mcp);
+      aiOrchestrator = orchestratorInstance;
+
+      logger.info({ connected: mcp.isConnected() }, 'MCP client manager + AI orchestrator initialized');
+    } catch (err) {
+      logger.warn({ error: (err as Error).message }, 'MCP client manager initialization failed (non-fatal), continuing without LI.FI tools');
+      // Still create AI orchestrator without MCP tools
+      aiOrchestrator = new AIOrchestrator();
+    }
+
+    // 7b-ia. AI intelligence modules
+    const strategySelector = new StrategySelector();
+    const nlCommandProcessor = new NLCommandProcessor();
+    const decisionReporter = new DecisionReporter();
+    const executionPreview = new ExecutionPreview({ connector: lifiConnector });
+    confirmationManager = new ConfirmationManager();
+    errorRecoveryManager = new ErrorRecoveryManager();
+
+    // Wire NL command + preview into REST server
+    restServer.setNLCommandProcessor(nlCommandProcessor, executionPreview);
+    logger.info('NL command processor + execution preview wired to REST API');
+
+    // 7b-ib. Risk management modules
+    const portfolioTierEngine = new PortfolioTierEngine();
+    const riskDialManager = new RiskDialManager(5 as RiskDialLevel, portfolioTierEngine);
+    const circuitBreaker = new DrawdownCircuitBreaker({
+      activationThreshold: -(config.risk.drawdownThreshold),
+      resetThreshold: -(config.risk.drawdownThreshold * 0.5),
+      aggressiveMode: true,
+      enabled: true,
+    });
+    logger.info(
+      { riskDial: 5, drawdownThreshold: config.risk.drawdownThreshold },
+      'Risk engine initialized (circuit breaker, portfolio tiers, risk dial)',
+    );
     const hlConnector = new HyperliquidConnector({
       walletAddress: wallet.account.address,
     });
@@ -212,11 +278,48 @@ async function main(): Promise<void> {
       walletAddress: wallet.account.address,
     });
 
+    // 7b-ii. Solana connector (conditional on SOLANA_PRIVATE_KEY)
+    if (process.env.SOLANA_PRIVATE_KEY) {
+      try {
+        const solConnector = new SolanaConnector();
+        solanaConnector = solConnector;
+
+        // Query balances and populate store
+        const { sol, splTokens } = await solConnector.getAllBalances();
+        const solChainId = chainId(SOLANA_CHAIN_ID);
+
+        // SOL native balance (keyed by WRAPPED_SOL_MINT for consistency)
+        const solUsdValue = 0; // Will be updated by market data service
+        store.setBalance(solChainId, tokenAddress(WRAPPED_SOL_MINT), sol, solUsdValue, 'SOL', 9);
+
+        // SPL token balances
+        for (const token of splTokens) {
+          store.setBalance(solChainId, tokenAddress(token.mint), token.amount, 0, token.mint, token.decimals);
+        }
+
+        // Create JupiterClient for Solana-native swaps
+        const jupClient = new JupiterClient(solConnector);
+        jupiterClient = jupClient;
+
+        logger.info(
+          { solBalance: sol.toString(), splTokenCount: splTokens.length },
+          'Solana: ENABLED — balances populated',
+        );
+      } catch (err) {
+        logger.warn({ error: (err as Error).message }, 'Solana connector initialization failed (non-fatal)');
+      }
+    } else {
+      logger.info('Solana: DISABLED (no private key)');
+    }
+
     // 7c. Utility executors (Arbitrum as primary chain)
     const publicClient = wallet.getPublicClient(ARBITRUM_CHAIN_ID);
     const walletClient = wallet.getWalletClient(ARBITRUM_CHAIN_ID);
     const approvalHandler = new ApprovalHandler(publicClient, walletClient);
     const txExecutor = new TransactionExecutor(publicClient, walletClient);
+    if (solanaConnector) {
+      txExecutor.setSolanaConnector(solanaConnector);
+    }
     const preFlightChecker = new PreFlightChecker();
 
     // 7d. Stat-arb dependencies (needed by StatArbPairExecutor)
@@ -299,11 +402,20 @@ async function main(): Promise<void> {
     );
     logger.info('Social sentinel started');
 
-    // Wire SignalAggregator with SocialEvaluator (subscribes to social_signal events)
+    // Wire SignalAggregator with all 4 evaluators
     const socialEvaluator = new SocialEvaluator(sentinelInstance);
+    const marketEvaluator = new MarketEvaluator(marketDataService);
+    const onChainEvaluator = new OnChainEvaluator(indexerInstance);
+    const technicalEvaluator = new TechnicalEvaluator(marketDataService);
     const signalAggregator = new SignalAggregator();
     signalAggregator.registerEvaluator(socialEvaluator);
-    logger.info('Signal aggregator wired with social evaluator');
+    signalAggregator.registerEvaluator(marketEvaluator);
+    signalAggregator.registerEvaluator(onChainEvaluator);
+    signalAggregator.registerEvaluator(technicalEvaluator);
+    logger.info(
+      { evaluators: signalAggregator.getRegisteredEvaluators().map(e => e.name) },
+      'Signal aggregator wired with all evaluators',
+    );
 
     // 7g. Stat-arb signal pipeline
     const signalGen = new SignalGenerator({}, universeScanner, priceFeed, store);
@@ -403,13 +515,19 @@ async function main(): Promise<void> {
     );
     logger.info('Balance reconciler initialized');
 
-    // 7i-b. Strategy runner
+    // 7i-b. Strategy runner (with AI + Risk wiring)
     const runner = new StrategyRunner({
       strategies,
       marketDataService,
       actionQueue,
       tickIntervalMs: config.tickIntervalMs,
       balanceReconciler,
+      signalAggregator,
+      aiOrchestrator,
+      strategySelector,
+      decisionReporter,
+      circuitBreaker,
+      portfolioTierEngine,
     });
     strategyRunner = runner;
     strategyRunnerPromise = runner.start();
@@ -480,6 +598,9 @@ async function main(): Promise<void> {
     if (chainScout) chainScout.stop();
     if (onChainIndexer) onChainIndexer.stop();
     if (socialSentinel) socialSentinel.stop();
+    if (mcpClientManager) mcpClientManager.disconnect();
+    if (confirmationManager) confirmationManager.cleanup();
+    if (errorRecoveryManager) errorRecoveryManager.cleanup();
 
     // 3. Stop agent (finishes processing current queue)
     agent.stop();
