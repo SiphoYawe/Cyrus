@@ -99,7 +99,7 @@ describe('HyperliquidOrderManager', () => {
   });
 
   it('limit order with IOC fills immediately or cancels', async () => {
-    // IOC with no fill → cancelled
+    // IOC with no fill -> cancelled
     const result = await manager.placeOrder(makeParams({
       type: 'limit',
       price: 2000000000000000000000n,
@@ -131,7 +131,7 @@ describe('HyperliquidOrderManager', () => {
   });
 
   it('limit order with FOK fills completely or cancels entirely (no partial)', async () => {
-    // FOK with no fill → cancelled
+    // FOK with no fill -> cancelled
     const result = await manager.placeOrder(makeParams({
       type: 'limit',
       price: 2000000000000000000000n,
@@ -276,7 +276,7 @@ describe('HyperliquidOrderManager', () => {
     manager.updatePartialFill('12346', '2010', '1.0');
     status = await manager.getOrderStatus('12346');
 
-    // Volume-weighted avg: (2000*0.5 + 2010*1.0) / 1.5 = 3010/1.5 ≈ 2006.67
+    // Volume-weighted avg: (2000*0.5 + 2010*1.0) / 1.5 = 3010/1.5 ~ 2006.67
     expect(parseFloat(status.averageFillPrice)).toBeCloseTo(2006.67, 1);
     expect(status.status).toBe('filled');
   });
@@ -299,5 +299,248 @@ describe('HyperliquidOrderManager', () => {
   it('sell side maps to short on connector', async () => {
     await manager.placeOrder(makeParams({ side: 'sell' }));
     expect(connector.placeMarketOrder).toHaveBeenCalledWith('ETH', 'short', '1.5', 18);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Error classification (Task 4)
+  // ---------------------------------------------------------------------------
+
+  describe('error classification', () => {
+    it('"insufficient margin" error maps to INSUFFICIENT_MARGIN rejection', async () => {
+      connector = mockConnector({
+        placeMarketOrder: vi.fn().mockResolvedValue({
+          status: 'error',
+          error: 'insufficient margin',
+        }),
+      });
+      manager = new HyperliquidOrderManager(connector);
+
+      try {
+        await manager.placeOrder(makeParams());
+        expect.fail('Should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(PerpOrderRejectedError);
+        expect((e as PerpOrderRejectedError).context.rejectionReason).toBe('INSUFFICIENT_MARGIN');
+      }
+    });
+
+    it('"size too small" error maps to SIZE_TOO_SMALL rejection', async () => {
+      connector = mockConnector({
+        placeMarketOrder: vi.fn().mockResolvedValue({
+          status: 'error',
+          error: 'size too small for this asset',
+        }),
+      });
+      manager = new HyperliquidOrderManager(connector);
+
+      try {
+        await manager.placeOrder(makeParams());
+        expect.fail('Should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(PerpOrderRejectedError);
+        expect((e as PerpOrderRejectedError).context.rejectionReason).toBe('SIZE_TOO_SMALL');
+      }
+    });
+
+    it('"rate limit" error maps to RATE_LIMITED rejection', async () => {
+      connector = mockConnector({
+        placeMarketOrder: vi.fn().mockResolvedValue({
+          status: 'error',
+          error: 'rate limit exceeded',
+        }),
+      });
+      manager = new HyperliquidOrderManager(connector);
+
+      try {
+        await manager.placeOrder(makeParams());
+        expect.fail('Should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(PerpOrderRejectedError);
+        expect((e as PerpOrderRejectedError).context.rejectionReason).toBe('RATE_LIMITED');
+      }
+    });
+
+    it('"too many requests" error also maps to RATE_LIMITED', async () => {
+      connector = mockConnector({
+        placeMarketOrder: vi.fn().mockResolvedValue({
+          status: 'error',
+          error: 'too many requests, please slow down',
+        }),
+      });
+      manager = new HyperliquidOrderManager(connector);
+
+      try {
+        await manager.placeOrder(makeParams());
+        expect.fail('Should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(PerpOrderRejectedError);
+        expect((e as PerpOrderRejectedError).context.rejectionReason).toBe('RATE_LIMITED');
+      }
+    });
+
+    it('"leverage exceeded" error maps to LEVERAGE_EXCEEDED', async () => {
+      connector = mockConnector({
+        placeMarketOrder: vi.fn().mockResolvedValue({
+          status: 'error',
+          error: 'max leverage for this asset is 20x',
+        }),
+      });
+      manager = new HyperliquidOrderManager(connector);
+
+      try {
+        await manager.placeOrder(makeParams());
+        expect.fail('Should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(PerpOrderRejectedError);
+        expect((e as PerpOrderRejectedError).context.rejectionReason).toBe('LEVERAGE_EXCEEDED');
+      }
+    });
+
+    it('unknown error maps to UNKNOWN rejection reason', async () => {
+      connector = mockConnector({
+        placeMarketOrder: vi.fn().mockResolvedValue({
+          status: 'error',
+          error: 'something completely unexpected',
+        }),
+      });
+      manager = new HyperliquidOrderManager(connector);
+
+      try {
+        await manager.placeOrder(makeParams());
+        expect.fail('Should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(PerpOrderRejectedError);
+        expect((e as PerpOrderRejectedError).context.rejectionReason).toBe('UNKNOWN');
+      }
+    });
+
+    it('connector exception with "insufficient margin" maps to INSUFFICIENT_MARGIN', async () => {
+      connector = mockConnector({
+        placeMarketOrder: vi.fn().mockRejectedValue(new Error('insufficient margin')),
+      });
+      manager = new HyperliquidOrderManager(connector);
+
+      try {
+        await manager.placeOrder(makeParams());
+        expect.fail('Should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(PerpOrderRejectedError);
+        expect((e as PerpOrderRejectedError).context.rejectionReason).toBe('INSUFFICIENT_MARGIN');
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Successful fill result parsing (Task 4)
+  // ---------------------------------------------------------------------------
+
+  describe('successful fill result parsing', () => {
+    it('market order fill returns correct orderId, fillSize, avgPrice', async () => {
+      connector = mockConnector({
+        placeMarketOrder: vi.fn().mockResolvedValue({
+          status: 'ok',
+          orderId: 77777,
+          filledSize: '2.5',
+          avgPrice: '3450.25',
+        }),
+      });
+      manager = new HyperliquidOrderManager(connector);
+
+      const result = await manager.placeOrder(makeParams());
+      expect(result.orderId).toBe('77777');
+      expect(result.fillSize).toBe('2.5');
+      expect(result.averageFillPrice).toBe('3450.25');
+      expect(result.status).toBe('filled');
+    });
+
+    it('market order with zero fill is treated as rejected', async () => {
+      connector = mockConnector({
+        placeMarketOrder: vi.fn().mockResolvedValue({
+          status: 'ok',
+          orderId: 88888,
+          filledSize: '0',
+          avgPrice: '0',
+        }),
+      });
+      manager = new HyperliquidOrderManager(connector);
+
+      const result = await manager.placeOrder(makeParams());
+      expect(result.status).toBe('rejected');
+      expect(result.orderId).toBe('88888');
+    });
+
+    it('limit order GTC with no fill is pending', async () => {
+      connector = mockConnector({
+        placeLimitOrder: vi.fn().mockResolvedValue({
+          status: 'ok',
+          orderId: 55555,
+          filledSize: '0',
+        }),
+      });
+      manager = new HyperliquidOrderManager(connector);
+
+      const result = await manager.placeOrder(makeParams({
+        type: 'limit',
+        price: 2000000000000000000000n,
+        timeInForce: 'GTC',
+        decimals: 18,
+      }));
+      expect(result.status).toBe('pending');
+      expect(result.orderId).toBe('55555');
+      expect(result.remainingSize).toBe('1.5');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // updatePartialFill (Task 4)
+  // ---------------------------------------------------------------------------
+
+  describe('updatePartialFill', () => {
+    it('updates fill size and calculates VWAP correctly', async () => {
+      // Place a pending limit order
+      connector = mockConnector({
+        placeLimitOrder: vi.fn().mockResolvedValue({
+          status: 'ok',
+          orderId: 33333,
+          filledSize: '0',
+        }),
+      });
+      manager = new HyperliquidOrderManager(connector);
+
+      await manager.placeOrder(makeParams({
+        type: 'limit',
+        price: 2000000000000000000000n,
+        timeInForce: 'GTC',
+        decimals: 18,
+      }));
+
+      // First partial fill: 0.5 at 2000
+      manager.updatePartialFill('33333', '2000', '0.5');
+      let status = await manager.getOrderStatus('33333');
+      expect(status.status).toBe('partial');
+      expect(status.fillPercentage).toBeCloseTo(0.333, 2); // 0.5 / 1.5
+
+      // Second partial fill: 0.5 at 2020
+      manager.updatePartialFill('33333', '2020', '0.5');
+      status = await manager.getOrderStatus('33333');
+      expect(status.status).toBe('partial');
+      // VWAP: (2000*0.5 + 2020*0.5) / 1.0 = 2010
+      expect(parseFloat(status.averageFillPrice)).toBeCloseTo(2010, 0);
+
+      // Third partial fill: 0.5 at 2040 -> fully filled
+      manager.updatePartialFill('33333', '2040', '0.5');
+      status = await manager.getOrderStatus('33333');
+      expect(status.status).toBe('filled');
+      // VWAP: (2000*0.5 + 2020*0.5 + 2040*0.5) / 1.5 = 2020
+      expect(parseFloat(status.averageFillPrice)).toBeCloseTo(2020, 0);
+      expect(parseFloat(status.remainingSize)).toBeCloseTo(0, 0);
+    });
+
+    it('ignores updatePartialFill for unknown orderId', async () => {
+      // Should not throw
+      manager.updatePartialFill('nonexistent', '2000', '1.0');
+      const status = await manager.getOrderStatus('nonexistent');
+      expect(status.status).toBe('pending');
+    });
   });
 });

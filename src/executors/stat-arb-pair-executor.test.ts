@@ -3,7 +3,7 @@ import { Store } from '../core/store.js';
 import { StatArbPairExecutor } from './stat-arb-pair-executor.js';
 import type { StatArbPairExecutorConfig } from './stat-arb-pair-executor.js';
 import type { HyperliquidConnectorInterface } from '../connectors/hyperliquid-connector.js';
-import type { HyperliquidOrderManager, PerpOrderResult } from '../connectors/hyperliquid-order-manager.js';
+import type { HyperliquidOrderManager, PerpOrderResult, PerpOrderParams } from '../connectors/hyperliquid-order-manager.js';
 import type { FundingRateTracker } from '../stat-arb/funding-rate-tracker.js';
 import type { StatArbPairAction } from '../core/action-types.js';
 import type { FundingRateMap, FundingRate } from '../connectors/hyperliquid-types.js';
@@ -508,5 +508,163 @@ describe('StatArbPairExecutor', () => {
     await executor.execute(action);
 
     expect(fundingTracker.finalizeFunding).toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------------
+  // FIX-16: End-to-end pair execution validation (Task 5)
+  // ---------------------------------------------------------------------------
+
+  describe('pair execution — both legs in same call', () => {
+    it('both long and short legs placed within a single execute() invocation', async () => {
+      const action = makeAction({
+        pair: { tokenA: 'ETH', tokenB: 'BTC', key: 'BTC-ETH' },
+        direction: 'long_pair',
+      });
+
+      await executor.execute(action);
+
+      // Exactly 2 order placements in the open stage (long + short)
+      const calls = (orderManager.placeOrder as ReturnType<typeof vi.fn>).mock.calls;
+      // At minimum 2 for open; could be 4 if close happened too
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+
+      // First call: long leg (buy on tokenA=ETH for long_pair)
+      expect(calls[0][0].symbol).toBe('ETH');
+      expect(calls[0][0].side).toBe('buy');
+      expect(calls[0][0].type).toBe('market');
+
+      // Second call: short leg (sell on tokenB=BTC for long_pair)
+      expect(calls[1][0].symbol).toBe('BTC');
+      expect(calls[1][0].side).toBe('sell');
+      expect(calls[1][0].type).toBe('market');
+    });
+  });
+
+  describe('rollback — first leg closed if second fails', () => {
+    it('closes long leg when short leg is rejected via PerpOrderRejectedError', async () => {
+      let callIdx = 0;
+      (orderManager.placeOrder as ReturnType<typeof vi.fn>).mockImplementation(
+        (params: PerpOrderParams) => {
+          callIdx++;
+          if (callIdx === 1) {
+            // Long leg fills
+            return Promise.resolve(makeOrderResult({ orderId: 'long-ok', fillPrice: '2000' }));
+          }
+          if (callIdx === 2) {
+            // Short leg rejected
+            throw new Error('insufficient margin for short leg');
+          }
+          // Rollback call
+          return Promise.resolve(makeOrderResult({ orderId: 'rollback-ok' }));
+        },
+      );
+
+      const result = await executor.execute(makeAction());
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Pair trade rollback');
+
+      // 3 calls: open long, open short (fail), rollback long
+      expect((orderManager.placeOrder as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(3);
+
+      // Rollback call is a sell on the long symbol
+      const rollbackParams = (orderManager.placeOrder as ReturnType<typeof vi.fn>).mock.calls[2][0];
+      expect(rollbackParams.side).toBe('sell');
+      expect(rollbackParams.symbol).toBe('ETH');
+
+      // No position should exist
+      expect(store.getAllActiveStatArbPositions()).toHaveLength(0);
+    });
+  });
+
+  describe('beta-neutral sizing with hedge ratio', () => {
+    it('hedge ratio 2.0 allocates 1/3 to long and 2/3 to short', async () => {
+      const action = makeAction({
+        hedgeRatio: 2.0,
+        capitalAllocation: 9000,
+      });
+
+      await executor.execute(action);
+
+      const calls = (orderManager.placeOrder as ReturnType<typeof vi.fn>).mock.calls;
+      const longSize = Number(calls[0][0].size);
+      const shortSize = Number(calls[1][0].size);
+
+      // longNotional = 9000 / (1+2) = 3000
+      // shortNotional = 9000 * 2 / (1+2) = 6000
+      const longNotional = longSize / 1e18;
+      const shortNotional = shortSize / 1e18;
+      expect(longNotional).toBeCloseTo(3000, 0);
+      expect(shortNotional).toBeCloseTo(6000, 0);
+    });
+
+    it('hedge ratio 0.5 allocates 2/3 to long and 1/3 to short', async () => {
+      const action = makeAction({
+        hedgeRatio: 0.5,
+        capitalAllocation: 6000,
+      });
+
+      await executor.execute(action);
+
+      const calls = (orderManager.placeOrder as ReturnType<typeof vi.fn>).mock.calls;
+      const longNotional = Number(calls[0][0].size) / 1e18;
+      const shortNotional = Number(calls[1][0].size) / 1e18;
+
+      // longNotional = 6000 / 1.5 = 4000
+      // shortNotional = 6000 * 0.5 / 1.5 = 2000
+      expect(longNotional).toBeCloseTo(4000, 0);
+      expect(shortNotional).toBeCloseTo(2000, 0);
+    });
+  });
+
+  describe('combined position tracking', () => {
+    it('position tracks both legs with entry prices from fills', async () => {
+      let callIdx = 0;
+      (orderManager.placeOrder as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callIdx++;
+        if (callIdx === 1) {
+          return Promise.resolve(makeOrderResult({ orderId: 'leg-A', fillPrice: '3100.50', averageFillPrice: '3100.50' }));
+        }
+        if (callIdx === 2) {
+          return Promise.resolve(makeOrderResult({ orderId: 'leg-B', fillPrice: '62500.00', averageFillPrice: '62500.00' }));
+        }
+        // Close calls
+        return Promise.resolve(makeOrderResult());
+      });
+
+      const action = makeAction({
+        pair: { tokenA: 'ETH', tokenB: 'BTC', key: 'BTC-ETH' },
+        direction: 'long_pair',
+        metadata: {}, // no close signal
+      });
+
+      await executor.execute(action);
+
+      const positions = store.getAllActiveStatArbPositions();
+      expect(positions).toHaveLength(1);
+
+      const pos = positions[0];
+      expect(pos.legA.symbol).toBe('ETH');
+      expect(pos.legA.entryPrice).toBe(3100.5);
+      expect(pos.legA.orderId).toBe('leg-A');
+      expect(pos.legB.symbol).toBe('BTC');
+      expect(pos.legB.entryPrice).toBe(62500);
+      expect(pos.legB.orderId).toBe('leg-B');
+      expect(pos.combinedPnl).toBeDefined();
+      expect(pos.accumulatedFunding).toBeDefined();
+    });
+
+    it('position has correct margin calculation', async () => {
+      const action = makeAction({
+        capitalAllocation: 5000,
+        leverage: 10,
+      });
+
+      await executor.execute(action);
+
+      const pos = store.getAllActiveStatArbPositions()[0];
+      // marginUsed = capital / leverage = 5000 / 10 = 500
+      expect(pos.marginUsed).toBe(500);
+    });
   });
 });

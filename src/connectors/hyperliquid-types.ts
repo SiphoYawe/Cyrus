@@ -102,10 +102,22 @@ export interface PerpPosition {
   readonly orderId: number | null;
 }
 
+/**
+ * EIP-712 signing callback. The caller (e.g. WalletManager) provides this
+ * so the connector can sign exchange actions without holding the private key.
+ * Returns the hex-encoded signature string.
+ */
+export type HyperliquidSignerFn = (
+  action: Record<string, unknown>,
+  nonce: number,
+) => Promise<string>;
+
 export interface HyperliquidConnectorConfig {
   readonly walletAddress: string;
   readonly apiUrl?: string;
   readonly wsUrl?: string;
   readonly reconnectDelayMs?: number;
   readonly maxReconnectAttempts?: number;
+  /** Optional EIP-712 signer for authenticated exchange actions. */
+  readonly signer?: HyperliquidSignerFn;
 }

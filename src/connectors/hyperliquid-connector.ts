@@ -15,6 +15,7 @@ import type {
   OpenInterest,
   OrderBookLevel,
   HyperliquidConnectorConfig,
+  HyperliquidSignerFn,
 } from './hyperliquid-types.js';
 
 const logger = createLogger('hyperliquid-connector');
@@ -84,7 +85,8 @@ export interface HyperliquidConnectorInterface {
 }
 
 export class HyperliquidConnector implements HyperliquidConnectorInterface {
-  private readonly config: Required<HyperliquidConnectorConfig>;
+  private readonly config: Omit<Required<HyperliquidConnectorConfig>, 'signer'>;
+  private readonly signer: HyperliquidSignerFn | undefined;
   private connected = false;
   private assetIndexCache: Map<string, number> | null = null;
 
@@ -96,6 +98,23 @@ export class HyperliquidConnector implements HyperliquidConnectorInterface {
       reconnectDelayMs: config.reconnectDelayMs ?? 5000,
       maxReconnectAttempts: config.maxReconnectAttempts ?? 10,
     };
+    this.signer = config.signer;
+  }
+
+  /**
+   * Build a signed exchange request body.
+   * If a signer is available, sign the action with EIP-712.
+   * Otherwise, send unsigned (testnet/testing mode).
+   */
+  private async buildExchangeBody(
+    action: Record<string, unknown>,
+    nonce: number,
+  ): Promise<Record<string, unknown>> {
+    if (this.signer) {
+      const signature = await this.signer(action, nonce);
+      return { action, nonce, signature, vaultAddress: null };
+    }
+    return { action, nonce, vaultAddress: null };
   }
 
   /**
@@ -284,16 +303,12 @@ export class HyperliquidConnector implements HyperliquidConnectorInterface {
         grouping: 'na',
       };
 
-      // Without direct private key access, post the action directly
-      // The exchange endpoint accepts the action with wallet authentication
+      const exchangeBody = await this.buildExchangeBody(orderAction, nonce);
+
       const response = await fetch(`${this.config.apiUrl}/exchange`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: orderAction,
-          nonce,
-          vaultAddress: null,
-        }),
+        body: JSON.stringify(exchangeBody),
       });
 
       if (!response.ok) {
@@ -373,14 +388,12 @@ export class HyperliquidConnector implements HyperliquidConnectorInterface {
         grouping: 'na',
       };
 
+      const exchangeBody = await this.buildExchangeBody(orderAction, nonce);
+
       const response = await fetch(`${this.config.apiUrl}/exchange`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: orderAction,
-          nonce,
-          vaultAddress: null,
-        }),
+        body: JSON.stringify(exchangeBody),
       });
 
       if (!response.ok) {
@@ -430,14 +443,12 @@ export class HyperliquidConnector implements HyperliquidConnectorInterface {
         cancels: [{ a: assetIndex, o: orderId }],
       };
 
+      const exchangeBody = await this.buildExchangeBody(cancelAction, nonce);
+
       const response = await fetch(`${this.config.apiUrl}/exchange`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: cancelAction,
-          nonce,
-          vaultAddress: null,
-        }),
+        body: JSON.stringify(exchangeBody),
       });
 
       if (!response.ok) {
@@ -506,14 +517,12 @@ export class HyperliquidConnector implements HyperliquidConnectorInterface {
         toPerp: true,
       };
 
+      const exchangeBody = await this.buildExchangeBody(depositAction, nonce);
+
       const response = await fetch(`${this.config.apiUrl}/exchange`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: depositAction,
-          nonce,
-          vaultAddress: null,
-        }),
+        body: JSON.stringify(exchangeBody),
       });
 
       if (!response.ok) {
@@ -546,14 +555,12 @@ export class HyperliquidConnector implements HyperliquidConnectorInterface {
         time: nonce,
       };
 
+      const exchangeBody = await this.buildExchangeBody(withdrawAction, nonce);
+
       const response = await fetch(`${this.config.apiUrl}/exchange`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: withdrawAction,
-          nonce,
-          vaultAddress: null,
-        }),
+        body: JSON.stringify(exchangeBody),
       });
 
       if (!response.ok) {
