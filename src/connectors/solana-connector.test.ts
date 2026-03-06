@@ -387,6 +387,78 @@ describe('WalletManager', () => {
   });
 });
 
+describe('agent bootstrap integration', () => {
+  beforeEach(() => {
+    Store.getInstance().reset();
+  });
+
+  afterEach(() => {
+    Store.getInstance().reset();
+  });
+
+  it('populates store balances from getAllBalances()', async () => {
+    const connector = new SolanaConnector({
+      keypairSecret: testSecretBase58,
+      rpcUrl: 'https://api.devnet.solana.com',
+      commitment: 'confirmed',
+      jupiterApiUrl: SOLANA_DEFAULTS.JUPITER_API_URL,
+    });
+
+    const { sol, splTokens } = await connector.getAllBalances();
+    const store = Store.getInstance();
+    const solChainId = chainId(SOLANA_CHAIN_ID);
+
+    // Populate store the same way index.ts does
+    store.setBalance(solChainId, tokenAddress(WRAPPED_SOL_MINT), sol, 0, 'SOL', 9);
+    for (const token of splTokens) {
+      store.setBalance(solChainId, tokenAddress(token.mint), token.amount, 0, token.mint, token.decimals);
+    }
+
+    // Verify SOL balance is in store
+    const solBalance = store.getBalance(solChainId, tokenAddress(WRAPPED_SOL_MINT));
+    expect(solBalance).toBeDefined();
+    expect(solBalance!.amount).toBe(5_000_000_000n);
+    expect(solBalance!.symbol).toBe('SOL');
+    expect(solBalance!.decimals).toBe(9);
+  });
+
+  it('gracefully handles missing SOLANA_PRIVATE_KEY (connector not initialized)', () => {
+    const originalEnv = process.env.SOLANA_PRIVATE_KEY;
+    delete process.env.SOLANA_PRIVATE_KEY;
+
+    const connector = new SolanaConnector({
+      rpcUrl: 'https://api.devnet.solana.com',
+      commitment: 'confirmed',
+      jupiterApiUrl: SOLANA_DEFAULTS.JUPITER_API_URL,
+    });
+
+    // Agent should check isInitialized() before proceeding
+    expect(connector.isInitialized()).toBe(false);
+
+    // Attempting to query balances without a key should throw
+    expect(() => connector.getPublicKey()).toThrow(SolanaConnectorError);
+
+    if (originalEnv !== undefined) {
+      process.env.SOLANA_PRIVATE_KEY = originalEnv;
+    }
+  });
+
+  it('getAllBalances returns sol and splTokens for store population', async () => {
+    const connector = new SolanaConnector({
+      keypairSecret: testSecretBase58,
+      rpcUrl: 'https://api.devnet.solana.com',
+      commitment: 'confirmed',
+      jupiterApiUrl: SOLANA_DEFAULTS.JUPITER_API_URL,
+    });
+
+    const result = await connector.getAllBalances();
+    expect(result).toHaveProperty('sol');
+    expect(result).toHaveProperty('splTokens');
+    expect(typeof result.sol).toBe('bigint');
+    expect(Array.isArray(result.splTokens)).toBe(true);
+  });
+});
+
 describe('EVM↔Solana bridging via LI.FI', () => {
   it('EVM→Solana uses toChainId 1151111081099710 and Solana public key as toAddress', () => {
     // Validate constants and address format

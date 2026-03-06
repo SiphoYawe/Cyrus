@@ -3,6 +3,8 @@ import { TransactionExecutor } from './transaction-executor.js';
 import type { TxPublicClient, TxWalletClient, TransactionReceipt } from './transaction-executor.js';
 import type { QuoteResult } from '../connectors/types.js';
 import { TransactionExecutionError } from '../utils/errors.js';
+import { SOLANA_CHAIN_ID } from '../connectors/solana-types.js';
+import type { SolanaConnector } from '../connectors/solana-connector.js';
 
 // --- Mock factories ---
 
@@ -248,6 +250,95 @@ describe('TransactionExecutor', () => {
 
       const sentArgs = mockSendTransaction.mock.calls[0][0];
       expect(sentArgs.gasPrice).toBeUndefined();
+    });
+  });
+
+  // --- Solana routing ---
+
+  describe('Solana transaction routing', () => {
+    function createMockSolanaConnector(overrides: Partial<SolanaConnector> = {}): SolanaConnector {
+      return {
+        signAndSendTransaction: vi.fn().mockResolvedValue('solana-tx-sig-abc123'),
+        waitForConfirmation: vi.fn().mockResolvedValue(true),
+        isInitialized: vi.fn().mockReturnValue(true),
+        ...overrides,
+      } as unknown as SolanaConnector;
+    }
+
+    function createSolanaQuote(): QuoteResult {
+      // Solana transaction data is base64-encoded
+      const txData = Buffer.from('fake-solana-tx-bytes').toString('base64');
+      return createMockQuote({
+        transactionRequest: {
+          to: 'SomeProgram111111111111111111111111111111111',
+          data: txData,
+          value: '0',
+          gasLimit: '0',
+          chainId: SOLANA_CHAIN_ID,
+        },
+        tool: 'allbridge',
+      });
+    }
+
+    it('routes Solana-chain transactions to SolanaConnector', async () => {
+      const mockSolana = createMockSolanaConnector();
+      executor.setSolanaConnector(mockSolana);
+
+      const quote = createSolanaQuote();
+      const result = await executor.execute(quote);
+
+      expect(result.txHash).toBe('solana-tx-sig-abc123');
+      expect(result.chainId).toBe(SOLANA_CHAIN_ID);
+      expect(result.status).toBe('success');
+      expect(mockSolana.signAndSendTransaction).toHaveBeenCalledTimes(1);
+      expect(mockSolana.waitForConfirmation).toHaveBeenCalledWith('solana-tx-sig-abc123');
+
+      // EVM wallet should NOT have been called
+      expect(walletClient.sendTransaction).not.toHaveBeenCalled();
+    });
+
+    it('throws TransactionExecutionError when no SolanaConnector attached', async () => {
+      // Do NOT call setSolanaConnector
+      const quote = createSolanaQuote();
+
+      await expect(executor.execute(quote)).rejects.toThrow(TransactionExecutionError);
+      await expect(executor.execute(quote)).rejects.toThrow('no SolanaConnector attached');
+    });
+
+    it('throws TransactionExecutionError when Solana confirmation fails', async () => {
+      const mockSolana = createMockSolanaConnector({
+        waitForConfirmation: vi.fn().mockResolvedValue(false),
+      });
+      executor.setSolanaConnector(mockSolana);
+
+      const quote = createSolanaQuote();
+
+      await expect(executor.execute(quote)).rejects.toThrow(TransactionExecutionError);
+      await expect(executor.execute(quote)).rejects.toThrow('confirmed with error');
+    });
+
+    it('throws TransactionExecutionError when signAndSendTransaction rejects', async () => {
+      const mockSolana = createMockSolanaConnector({
+        signAndSendTransaction: vi.fn().mockRejectedValue(new Error('Solana RPC unavailable')),
+      });
+      executor.setSolanaConnector(mockSolana);
+
+      const quote = createSolanaQuote();
+
+      await expect(executor.execute(quote)).rejects.toThrow(TransactionExecutionError);
+    });
+
+    it('does not route EVM transactions to SolanaConnector even when attached', async () => {
+      const mockSolana = createMockSolanaConnector();
+      executor.setSolanaConnector(mockSolana);
+
+      const evmQuote = createMockQuote(); // chainId: 1 (Ethereum)
+      await executor.execute(evmQuote);
+
+      // Solana connector should NOT be called for EVM transactions
+      expect(mockSolana.signAndSendTransaction).not.toHaveBeenCalled();
+      // EVM wallet SHOULD be called
+      expect(walletClient.sendTransaction).toHaveBeenCalledTimes(1);
     });
   });
 });

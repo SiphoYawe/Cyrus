@@ -2,6 +2,8 @@
 // CRITICAL: Always verify wallet chain matches transactionRequest.chainId before signing
 
 import type { QuoteResult } from '../connectors/types.js';
+import type { SolanaConnector } from '../connectors/solana-connector.js';
+import { SOLANA_CHAIN_ID } from '../connectors/solana-types.js';
 import { TransactionExecutionError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -46,10 +48,19 @@ export interface TransactionResult {
 export class TransactionExecutor {
   private readonly publicClient: TxPublicClient;
   private readonly walletClient: TxWalletClient;
+  private solanaConnector: SolanaConnector | null = null;
 
   constructor(publicClient: TxPublicClient, walletClient: TxWalletClient) {
     this.publicClient = publicClient;
     this.walletClient = walletClient;
+  }
+
+  /**
+   * Optionally attach a SolanaConnector for routing Solana-chain transactions.
+   */
+  setSolanaConnector(connector: SolanaConnector): void {
+    this.solanaConnector = connector;
+    logger.info('Solana connector attached to TransactionExecutor');
   }
 
   /**
@@ -59,6 +70,11 @@ export class TransactionExecutor {
   async execute(quote: QuoteResult): Promise<TransactionResult> {
     const { transactionRequest } = quote;
     const targetChainId = transactionRequest.chainId;
+
+    // Route Solana transactions to SolanaConnector
+    if (targetChainId === SOLANA_CHAIN_ID) {
+      return this.executeSolanaTransaction(quote);
+    }
 
     try {
       // Verify wallet chain matches target chain
@@ -160,6 +176,69 @@ export class TransactionExecutor {
       const message = error instanceof Error ? error.message : 'Unknown transaction error';
       throw new TransactionExecutionError(message, {
         chainId: targetChainId,
+        to: transactionRequest.to,
+      });
+    }
+  }
+
+  /**
+   * Execute a Solana-chain transaction via SolanaConnector.
+   * The transactionRequest.data is expected to be a base64-encoded serialized transaction.
+   */
+  private async executeSolanaTransaction(quote: QuoteResult): Promise<TransactionResult> {
+    if (!this.solanaConnector) {
+      throw new TransactionExecutionError(
+        'Solana transaction requested but no SolanaConnector attached',
+        { chainId: SOLANA_CHAIN_ID },
+      );
+    }
+
+    const { transactionRequest } = quote;
+
+    try {
+      // LI.FI returns Solana transaction data as base64-encoded serialized transaction
+      const txData = Buffer.from(transactionRequest.data, 'base64');
+
+      logger.info(
+        { chainId: SOLANA_CHAIN_ID, tool: quote.tool, dataLength: txData.length },
+        'Submitting Solana transaction via SolanaConnector',
+      );
+
+      const signature = await this.solanaConnector.signAndSendTransaction(txData);
+
+      logger.info({ signature, chainId: SOLANA_CHAIN_ID }, 'Solana transaction sent, waiting for confirmation');
+
+      const confirmed = await this.solanaConnector.waitForConfirmation(signature);
+
+      if (!confirmed) {
+        throw new TransactionExecutionError(
+          'Solana transaction confirmed with error',
+          { chainId: SOLANA_CHAIN_ID, txHash: signature },
+        );
+      }
+
+      const result: TransactionResult = {
+        txHash: signature,
+        chainId: SOLANA_CHAIN_ID,
+        blockNumber: 0n, // Solana uses slots, not block numbers in the same way
+        gasUsed: 0n, // Solana uses compute units, not gas
+        status: 'success',
+      };
+
+      logger.info(
+        { txHash: result.txHash, chainId: SOLANA_CHAIN_ID, status: result.status },
+        'Solana transaction confirmed',
+      );
+
+      return result;
+    } catch (error) {
+      if (error instanceof TransactionExecutionError) {
+        throw error;
+      }
+
+      const message = error instanceof Error ? error.message : 'Unknown Solana transaction error';
+      throw new TransactionExecutionError(message, {
+        chainId: SOLANA_CHAIN_ID,
         to: transactionRequest.to,
       });
     }
