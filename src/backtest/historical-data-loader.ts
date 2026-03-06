@@ -6,6 +6,14 @@ import { createLogger } from '../utils/logger.js';
 import { LookaheadError } from './errors.js';
 import type { HistoricalDataPoint } from './types.js';
 
+// CoinGecko token ID mapping for common tokens
+const COINGECKO_TOKEN_MAP: Record<string, string> = {
+  '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': 'usd-coin',      // USDC (Ethereum)
+  '0xdac17f958d2ee523a2206206994597c13d831ec7': 'tether',          // USDT (Ethereum)
+  '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 'weth',            // WETH (Ethereum)
+  '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599': 'wrapped-bitcoin',  // WBTC
+};
+
 const logger = createLogger('historical-data-loader');
 
 /**
@@ -326,5 +334,152 @@ export class HistoricalDataLoader {
    */
   loadDirect(points: HistoricalDataPoint[]): void {
     this.addDataPoints(points);
+  }
+
+  // --- CoinGecko historical data fetching ---
+
+  /**
+   * Fetch historical OHLC data from CoinGecko for a token.
+   *
+   * @param tokenAddress - EVM token contract address
+   * @param chainId - EVM chain ID
+   * @param days - Number of days of history (max 365 for free tier)
+   * @param coingeckoId - Optional CoinGecko token ID override
+   */
+  async fetchFromCoinGecko(
+    tokenAddress: string,
+    chainId: number,
+    days: number = 30,
+    coingeckoId?: string,
+  ): Promise<HistoricalDataPoint[]> {
+    const id = coingeckoId ?? COINGECKO_TOKEN_MAP[tokenAddress.toLowerCase()];
+    if (!id) {
+      throw new Error(
+        `No CoinGecko ID found for token ${tokenAddress}. Pass coingeckoId explicitly.`,
+      );
+    }
+
+    const url = `https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=${days}`;
+
+    logger.info({ tokenAddress, chainId, coingeckoId: id, days }, 'Fetching CoinGecko historical data');
+
+    const response = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+    });
+
+    if (!response.ok) {
+      throw new Error(`CoinGecko API error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = (await response.json()) as {
+      prices: [number, number][];
+      total_volumes: [number, number][];
+    };
+
+    if (!data.prices || !Array.isArray(data.prices)) {
+      throw new Error('CoinGecko response missing prices array');
+    }
+
+    // Build volume lookup (timestamps may not perfectly align)
+    const volumeMap = new Map<number, number>();
+    if (data.total_volumes) {
+      for (const [ts, vol] of data.total_volumes) {
+        volumeMap.set(ts, vol);
+      }
+    }
+
+    const points: HistoricalDataPoint[] = data.prices.map(([timestamp, price]) => ({
+      timestamp,
+      token: tokenAddress,
+      chainId,
+      price,
+      volume: volumeMap.get(timestamp) ?? 0,
+    }));
+
+    this.addDataPoints(points);
+    logger.info({ tokenAddress, chainId, count: points.length }, 'CoinGecko data loaded');
+    return points;
+  }
+
+  // --- Multi-token data alignment ---
+
+  /**
+   * Align multiple token time series to shared timestamps via forward-fill.
+   *
+   * Given a set of token+chain keys, produces a unified set of timestamps
+   * where every key has a price at every timestamp. Missing prices are
+   * forward-filled from the most recent available value.
+   *
+   * @param keys - Array of `${chainId}-${token}` keys to align
+   * @param intervalMs - Desired interval between aligned timestamps
+   * @returns Map of key → aligned HistoricalDataPoint[]
+   */
+  alignTimeSeries(
+    keys: string[],
+    intervalMs: number = 3600_000, // default 1 hour
+  ): Map<string, HistoricalDataPoint[]> {
+    // Find the global start and end across all requested keys
+    let globalStart = Infinity;
+    let globalEnd = -Infinity;
+
+    for (const key of keys) {
+      const points = this.index.get(key);
+      if (!points || points.length === 0) continue;
+      globalStart = Math.min(globalStart, points[0].timestamp);
+      globalEnd = Math.max(globalEnd, points[points.length - 1].timestamp);
+    }
+
+    if (globalStart === Infinity || globalEnd === -Infinity) {
+      return new Map(keys.map((k) => [k, []]));
+    }
+
+    // Generate aligned timestamps
+    const timestamps: number[] = [];
+    for (let t = globalStart; t <= globalEnd; t += intervalMs) {
+      timestamps.push(t);
+    }
+
+    const result = new Map<string, HistoricalDataPoint[]>();
+
+    for (const key of keys) {
+      const points = this.index.get(key);
+      if (!points || points.length === 0) {
+        result.set(key, []);
+        continue;
+      }
+
+      const [chainIdStr, token] = key.split('-', 2);
+      const chainIdNum = Number(chainIdStr);
+      const aligned: HistoricalDataPoint[] = [];
+
+      let lastIdx = -1;
+      for (const ts of timestamps) {
+        // Binary search for latest point at or before ts
+        const idx = this.binarySearchFloor(points, ts);
+        if (idx >= 0) {
+          lastIdx = idx;
+        }
+
+        if (lastIdx >= 0) {
+          aligned.push({
+            timestamp: ts,
+            token,
+            chainId: chainIdNum,
+            price: points[lastIdx].price,
+            volume: points[lastIdx].volume,
+            apy: points[lastIdx].apy,
+          });
+        }
+      }
+
+      result.set(key, aligned);
+    }
+
+    logger.debug(
+      { keys: keys.length, timestamps: timestamps.length, intervalMs },
+      'Time series aligned',
+    );
+
+    return result;
   }
 }

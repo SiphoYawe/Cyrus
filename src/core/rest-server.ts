@@ -24,6 +24,7 @@ import {
   createActionsApproveHandler,
   createActionsDenyHandler,
 } from './rest-handlers/actions-handler.js';
+import { createBacktestingResultsHandler } from './rest-handlers/backtesting-handler.js';
 import type { OpenClawPlugin } from '../openclaw/plugin.js';
 
 const logger = createLogger('rest-server');
@@ -84,6 +85,7 @@ export class AgentRestServer {
     this.routes.set('/api/strategies/performance', createPerformanceHandler(deps.store, deps.config));
     this.routes.set('/api/activity/decisions', createDecisionsHandler(deps.store));
     this.routes.set('/api/health/detailed', createDetailedHealthHandler(deps.store, deps.agent));
+    this.routes.set('/api/backtesting/results', createBacktestingResultsHandler(deps.persistence));
 
     // Action preview/approve/deny — requires OpenClaw plugin
     if (deps.openClawPlugin) {

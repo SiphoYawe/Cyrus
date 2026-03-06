@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS backtest_results (
+  id TEXT PRIMARY KEY,
+  strategy_name TEXT NOT NULL,
+  start_date INTEGER NOT NULL,
+  end_date INTEGER NOT NULL,
+  initial_capital TEXT NOT NULL,
+  final_portfolio_value TEXT NOT NULL,
+  total_trades INTEGER NOT NULL,
+  total_return REAL NOT NULL,
+  sharpe_ratio REAL NOT NULL,
+  sortino_ratio REAL NOT NULL,
+  max_drawdown REAL NOT NULL,
+  win_rate REAL NOT NULL,
+  profit_factor REAL NOT NULL,
+  calmar_ratio REAL NOT NULL,
+  annualized_return REAL NOT NULL,
+  parameters_json TEXT,
+  equity_curve_json TEXT NOT NULL,
+  trade_log_json TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);

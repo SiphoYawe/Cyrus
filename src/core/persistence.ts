@@ -336,6 +336,93 @@ export class PersistenceService {
     return result.changes;
   }
 
+  // --- Backtest results persistence ---
+
+  saveBacktestResult(result: {
+    id: string;
+    strategyName: string;
+    startDate: number;
+    endDate: number;
+    initialCapital: string;
+    finalPortfolioValue: string;
+    totalTrades: number;
+    totalReturn: number;
+    sharpeRatio: number;
+    sortinoRatio: number;
+    maxDrawdown: number;
+    winRate: number;
+    profitFactor: number;
+    calmarRatio: number;
+    annualizedReturn: number;
+    parametersJson: string | null;
+    equityCurveJson: string;
+    tradeLogJson: string;
+    durationMs: number;
+  }): void {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO backtest_results
+        (id, strategy_name, start_date, end_date, initial_capital, final_portfolio_value,
+         total_trades, total_return, sharpe_ratio, sortino_ratio, max_drawdown,
+         win_rate, profit_factor, calmar_ratio, annualized_return,
+         parameters_json, equity_curve_json, trade_log_json, duration_ms, created_at)
+      VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      result.id,
+      result.strategyName,
+      result.startDate,
+      result.endDate,
+      result.initialCapital,
+      result.finalPortfolioValue,
+      result.totalTrades,
+      result.totalReturn,
+      result.sharpeRatio,
+      result.sortinoRatio,
+      result.maxDrawdown,
+      result.winRate,
+      result.profitFactor,
+      result.calmarRatio,
+      result.annualizedReturn,
+      result.parametersJson,
+      result.equityCurveJson,
+      result.tradeLogJson,
+      result.durationMs,
+      new Date().toISOString(),
+    );
+
+    logger.debug({ backtestId: result.id, strategy: result.strategyName }, 'Backtest result saved');
+  }
+
+  getBacktestResults(
+    limit: number = 50,
+    offset: number = 0,
+    strategyName?: string,
+  ): { entries: Array<Record<string, unknown>>; total: number } {
+    let countQuery = 'SELECT COUNT(*) as count FROM backtest_results';
+    let dataQuery = 'SELECT * FROM backtest_results';
+    const params: unknown[] = [];
+
+    if (strategyName) {
+      countQuery += ' WHERE strategy_name = ?';
+      dataQuery += ' WHERE strategy_name = ?';
+      params.push(strategyName);
+    }
+
+    dataQuery += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+
+    const total = (
+      this.db.prepare(countQuery).get(...params) as { count: number }
+    ).count;
+
+    const rows = this.db
+      .prepare(dataQuery)
+      .all(...params, limit, offset) as Array<Record<string, unknown>>;
+
+    return { entries: rows, total };
+  }
+
   // --- Lifecycle ---
 
   getDb(): Database.Database {
