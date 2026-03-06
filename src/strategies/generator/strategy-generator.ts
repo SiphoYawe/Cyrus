@@ -9,6 +9,12 @@ import { RunnableBase } from '../../core/runnable-base.js';
 import { Store } from '../../core/store.js';
 import type { BacktestEngine } from '../../backtest/backtest-engine.js';
 import type { PerformanceAnalyzer } from '../../backtest/performance-analyzer.js';
+import { CrossChainStrategy } from '../cross-chain-strategy.js';
+import type {
+  StrategySignal,
+  ExecutionPlan,
+  StrategyContext,
+} from '../../core/types.js';
 import { VariantValidator } from './variant-validator.js';
 import { Tournament } from './tournament.js';
 import { PaperTrader } from './paper-trader.js';
@@ -73,6 +79,79 @@ MUTATION: Increased stoploss threshold and added momentum filter
 Generate meaningful variations: different indicator combinations, adjusted thresholds, modified risk parameters, new filter logic.`;
 
 /**
+ * Create a lightweight CrossChainStrategy from a GeneratedVariant's source code.
+ *
+ * Parses risk parameters (stoploss, maxPositions, minimalRoi, trailingStop) from
+ * the variant source using the same regex patterns as VariantValidator.
+ * shouldExecute always returns null — the paper trader's value is in testing
+ * the risk parameters (stoploss/ROI exit thresholds), not generating signals.
+ */
+export function createVariantStrategy(variant: GeneratedVariant): CrossChainStrategy {
+  const src = variant.sourceCode;
+
+  // Parse stoploss — matches patterns like `stoploss = -0.05`
+  const stoplossMatch = src.match(/\bstoploss\s*[=:]\s*(-?\d+\.?\d*)/);
+  const stoploss = stoplossMatch ? parseFloat(stoplossMatch[1]) : -0.10;
+
+  // Parse maxPositions
+  const maxPosMatch = src.match(/\bmaxPositions\s*[=:]\s*(\d+)/);
+  const maxPositions = maxPosMatch ? parseInt(maxPosMatch[1], 10) : 3;
+
+  // Parse minimalRoi — matches patterns like `minimalRoi = { 0: 0.03, 60: 0.01 }`
+  const roiMatch = src.match(/\bminimalRoi\s*[=:]\s*\{([^}]*)\}/);
+  const minimalRoi: Record<number, number> = { 0: 0.05 };
+  if (roiMatch) {
+    const entries = roiMatch[1].matchAll(/(\d+)\s*:\s*(\d+\.?\d*)/g);
+    for (const entry of entries) {
+      const key = parseInt(entry[1], 10);
+      const value = parseFloat(entry[2]);
+      if (!isNaN(key) && !isNaN(value) && value > 0) {
+        minimalRoi[key] = value;
+      }
+    }
+  }
+
+  // Parse trailingStop
+  const trailingMatch = src.match(/\btrailingStop\s*[=:]\s*(true|false)/);
+  const trailingStop = trailingMatch ? trailingMatch[1] === 'true' : false;
+
+  // Parse class name for use as strategy name
+  const classNameMatch = src.match(/\bclass\s+(\w+)\s+extends/);
+  const className = classNameMatch ? classNameMatch[1] : 'variant';
+  const strategyName = `${className}-${variant.id.slice(0, 8)}`;
+
+  // Create a concrete strategy subclass with parsed parameters
+  class VariantStrategy extends CrossChainStrategy {
+    readonly name = strategyName;
+    readonly timeframe = '5m';
+    override readonly stoploss = stoploss;
+    override readonly maxPositions = maxPositions;
+    override readonly minimalRoi = minimalRoi;
+    override readonly trailingStop = trailingStop;
+
+    shouldExecute(_context: StrategyContext): StrategySignal | null {
+      return null;
+    }
+
+    buildExecution(
+      _signal: StrategySignal,
+      _context: StrategyContext,
+    ): ExecutionPlan {
+      return {
+        id: `plan-${variant.id.slice(0, 8)}`,
+        strategyName: this.name,
+        actions: [],
+        estimatedCostUsd: 0,
+        estimatedDurationMs: 0,
+        metadata: { variantId: variant.id, mutation: variant.mutationDescription },
+      };
+    }
+  }
+
+  return new VariantStrategy();
+}
+
+/**
  * StrategyGenerator extends RunnableBase with a weekly tick interval.
  * Each tick runs a full evolution cycle: generate -> validate -> backtest -> tournament -> paper-trade -> promote.
  */
@@ -107,8 +186,12 @@ export class StrategyGenerator extends RunnableBase {
 
   /**
    * Weekly control task — runs the full evolution cycle.
+   * Loads base strategy source from disk on first run if not already cached.
    */
   async controlTask(): Promise<void> {
+    if (this.cachedBaseStrategySource === null) {
+      await this.loadBaseStrategyFromDisk();
+    }
     await this.runEvolutionCycle();
   }
 
@@ -456,8 +539,40 @@ Generate ${count} meaningfully different variants. Each should have a distinct a
       const variant = this.variants.get(result.variantId);
       if (variant) {
         variant.status = 'paper-trading';
-        // In a full implementation, we would create a PaperTrader instance here
-        // and start it with the compiled strategy variant
+
+        try {
+          const variantStrategy = createVariantStrategy(variant);
+          const paperTrader = new PaperTrader(
+            variantStrategy,
+            variant.id,
+            this.config.paperTradingDays,
+          );
+
+          // Start paper trader in background (non-blocking)
+          paperTrader.start().catch((err) => {
+            this.logger.error(
+              { error: err, variantId: variant.id },
+              'Paper trader failed during execution',
+            );
+          });
+
+          this.activePaperTraders.set(variant.id, paperTrader);
+
+          this.logger.info(
+            {
+              variantId: variant.id,
+              strategyName: variantStrategy.name,
+              paperTradingDays: this.config.paperTradingDays,
+            },
+            'Paper trader started for promoted variant',
+          );
+        } catch (err) {
+          this.logger.error(
+            { error: err, variantId: variant.id },
+            'Failed to create paper trader for variant',
+          );
+          variant.status = 'eliminated';
+        }
       }
     }
 

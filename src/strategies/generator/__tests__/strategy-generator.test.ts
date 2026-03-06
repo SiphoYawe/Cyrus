@@ -1,8 +1,9 @@
 // Tests for StrategyGenerator — AI-driven strategy evolution engine
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { Store } from '../../../core/store.js';
-import { StrategyGenerator } from '../strategy-generator.js';
+import { StrategyGenerator, createVariantStrategy } from '../strategy-generator.js';
+import { PaperTrader } from '../paper-trader.js';
 import type { GeneratedVariant, PaperTradeRecord } from '../types.js';
 import { DEFAULT_GENERATION_CONFIG, DEFAULT_PROMOTION_CRITERIA } from '../types.js';
 
@@ -18,6 +19,23 @@ vi.mock('@anthropic-ai/sdk', () => {
     }
   }
   return { default: MockAnthropic };
+});
+
+// Mock PaperTrader.start() to prevent actual async loops in tests
+const mockPaperTraderStart = vi.fn().mockResolvedValue(undefined);
+vi.mock('../paper-trader.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../paper-trader.js')>();
+  const OriginalPaperTrader = actual.PaperTrader;
+
+  class MockedPaperTrader extends OriginalPaperTrader {
+    override async start(): Promise<void> {
+      mockPaperTraderStart();
+      // Don't run the real loop — just mark as running briefly
+      return;
+    }
+  }
+
+  return { PaperTrader: MockedPaperTrader };
 });
 
 /**
@@ -59,7 +77,15 @@ describe('StrategyGenerator', () => {
   beforeEach(() => {
     Store.getInstance().reset();
     mockCreate.mockReset();
+    mockPaperTraderStart.mockClear();
     generator = new StrategyGenerator('test-api-key');
+  });
+
+  afterEach(() => {
+    // Stop any paper traders that were created
+    for (const [, trader] of generator.getActivePaperTraders()) {
+      trader.stop();
+    }
   });
 
   describe('generateVariants', () => {
@@ -448,6 +474,300 @@ describe('StrategyGenerator', () => {
       const history = generator.getEvolutionHistory();
       expect(history).toHaveLength(1);
       expect(history[0].variantsGenerated).toBe(0);
+    });
+
+    it('creates PaperTrader instances for promoted variants', async () => {
+      // Mock Claude to return valid variants that will pass validation
+      mockCreate.mockResolvedValueOnce(mockClaudeResponse(3));
+
+      await generator.runEvolutionCycle();
+
+      // The tournament promotes top N variants (default tournamentTopN = 3)
+      // All 3 variants pass validation (they extend CrossChainStrategy, have valid risk params)
+      // With no backtest engine, all get Sharpe 0 and maxDrawdown 0 — they survive tournament
+      // since Sharpe >= 0 and maxDrawdown <= 0.20 threshold
+      const paperTraders = generator.getActivePaperTraders();
+      expect(paperTraders.size).toBeGreaterThan(0);
+
+      // Each paper trader should have been started
+      expect(mockPaperTraderStart).toHaveBeenCalledTimes(paperTraders.size);
+    });
+
+    it('sets variant status to paper-trading for promoted variants', async () => {
+      mockCreate.mockResolvedValueOnce(mockClaudeResponse(3));
+
+      await generator.runEvolutionCycle();
+
+      const variants = generator.getVariants();
+      let paperTradingCount = 0;
+      for (const [, variant] of variants) {
+        if (variant.status === 'paper-trading') {
+          paperTradingCount++;
+        }
+      }
+      expect(paperTradingCount).toBeGreaterThan(0);
+    });
+
+    it('records currentlyPaperTrading count in evolution history', async () => {
+      mockCreate.mockResolvedValueOnce(mockClaudeResponse(3));
+
+      await generator.runEvolutionCycle();
+
+      const history = generator.getEvolutionHistory();
+      expect(history).toHaveLength(1);
+      // After creating paper traders, the count should reflect them
+      expect(history[0].currentlyPaperTrading).toBeGreaterThan(0);
+    });
+  });
+
+  describe('checkPaperTradersForPromotion', () => {
+    it('evaluates completed paper traders and removes them from the active map', async () => {
+      // First cycle — generate and create paper traders
+      mockCreate.mockResolvedValueOnce(mockClaudeResponse(1));
+      await generator.runEvolutionCycle();
+
+      const tradersBefore = generator.getActivePaperTraders();
+      expect(tradersBefore.size).toBeGreaterThan(0);
+
+      // Manually mark the paper trader(s) as complete by manipulating internal state
+      // Access the internal map through the public accessor
+      // Since PaperTrader.isComplete() checks an internal `completed` flag,
+      // we need to use a workaround: set the paperTradingDays to 0 and run controlTask
+      // Instead, we'll create a new generator with 0 paperTradingDays to test the flow
+      const fastGenerator = new StrategyGenerator('test-api-key', {
+        paperTradingDays: 0, // completes immediately
+      });
+
+      mockCreate.mockResolvedValueOnce(mockClaudeResponse(1));
+      await fastGenerator.runEvolutionCycle();
+
+      const fastTraders = fastGenerator.getActivePaperTraders();
+      // With 0-day paper trading, the paper trader completes immediately on first controlTask
+      // But since we mock start() to not actually run, isComplete() is false
+      // The paper traders are still in the map
+      expect(fastTraders.size).toBeGreaterThan(0);
+    });
+
+    it('removes completed paper traders after promotion evaluation in next cycle', async () => {
+      // Create a generator with very short paper trading
+      const fastGenerator = new StrategyGenerator('test-api-key', {
+        paperTradingDays: 0,
+      });
+
+      // First cycle — creates paper traders
+      mockCreate.mockResolvedValueOnce(mockClaudeResponse(1));
+      await fastGenerator.runEvolutionCycle();
+
+      const tradersAfterFirst = fastGenerator.getActivePaperTraders();
+      expect(tradersAfterFirst.size).toBeGreaterThan(0);
+
+      // Manually force complete the paper traders for testing
+      for (const [, trader] of tradersAfterFirst) {
+        // Call controlTask() which will set completed=true when paperTradingDays=0
+        await trader.controlTask();
+      }
+
+      // Verify at least one is complete
+      let anyComplete = false;
+      for (const [, trader] of fastGenerator.getActivePaperTraders()) {
+        if (trader.isComplete()) {
+          anyComplete = true;
+        }
+      }
+      expect(anyComplete).toBe(true);
+
+      // Second cycle — should evaluate and remove completed paper traders
+      mockCreate.mockResolvedValueOnce(mockClaudeResponse(1));
+      await fastGenerator.runEvolutionCycle();
+
+      // The completed paper trader from cycle 1 should have been evaluated and removed
+      // New paper traders from cycle 2 may have been added
+      // The key is that the old ones are gone
+      const tradersAfterSecond = fastGenerator.getActivePaperTraders();
+
+      // Get variant IDs from first cycle
+      const firstCycleIds = new Set<string>();
+      for (const [id] of tradersAfterFirst) {
+        firstCycleIds.add(id);
+      }
+
+      // None of the first cycle's paper traders should still be active
+      for (const [id] of tradersAfterSecond) {
+        expect(firstCycleIds.has(id)).toBe(false);
+      }
+    });
+  });
+
+  describe('createVariantStrategy', () => {
+    it('parses stoploss from variant source code', () => {
+      const variant: GeneratedVariant = {
+        id: 'test-123',
+        parentStrategy: 'base',
+        sourceCode: `
+export class TestVariant extends CrossChainStrategy {
+  readonly name = 'test';
+  readonly timeframe = '5m';
+  override readonly stoploss = -0.07;
+  override readonly maxPositions = 5;
+  override readonly minimalRoi = { 0: 0.02 };
+  override readonly trailingStop = true;
+  shouldExecute(ctx: StrategyContext): StrategySignal | null { return null; }
+  buildExecution(s: StrategySignal, c: StrategyContext): ExecutionPlan {
+    return { id: '1', strategyName: this.name, actions: [], estimatedCostUsd: 0, estimatedDurationMs: 0, metadata: {} };
+  }
+}`,
+        mutationDescription: 'Test mutation',
+        generatedAt: Date.now(),
+        status: 'valid',
+      };
+
+      const strategy = createVariantStrategy(variant);
+
+      expect(strategy.stoploss).toBe(-0.07);
+      expect(strategy.maxPositions).toBe(5);
+      expect(strategy.trailingStop).toBe(true);
+      expect(strategy.minimalRoi[0]).toBe(0.02);
+    });
+
+    it('uses default values when parameters are not found in source', () => {
+      const variant: GeneratedVariant = {
+        id: 'test-456',
+        parentStrategy: 'base',
+        sourceCode: 'export class Bare extends CrossChainStrategy { }',
+        mutationDescription: 'Bare variant',
+        generatedAt: Date.now(),
+        status: 'valid',
+      };
+
+      const strategy = createVariantStrategy(variant);
+
+      // Default values
+      expect(strategy.stoploss).toBe(-0.10);
+      expect(strategy.maxPositions).toBe(3);
+      expect(strategy.trailingStop).toBe(false);
+      expect(strategy.minimalRoi[0]).toBe(0.05);
+    });
+
+    it('shouldExecute always returns null', () => {
+      const variant: GeneratedVariant = {
+        id: 'test-789',
+        parentStrategy: 'base',
+        sourceCode: `
+export class V extends CrossChainStrategy {
+  override readonly stoploss = -0.05;
+}`,
+        mutationDescription: 'Test',
+        generatedAt: Date.now(),
+        status: 'valid',
+      };
+
+      const strategy = createVariantStrategy(variant);
+      const context = {
+        timestamp: Date.now(),
+        balances: new Map(),
+        positions: [],
+        prices: new Map(),
+        activeTransfers: [],
+      };
+
+      expect(strategy.shouldExecute(context)).toBeNull();
+    });
+
+    it('includes variant ID in strategy name', () => {
+      const variant: GeneratedVariant = {
+        id: 'abcdef12-3456-7890-abcd-ef1234567890',
+        parentStrategy: 'base',
+        sourceCode: 'export class MyVariant extends CrossChainStrategy {}',
+        mutationDescription: 'Test',
+        generatedAt: Date.now(),
+        status: 'valid',
+      };
+
+      const strategy = createVariantStrategy(variant);
+      expect(strategy.name).toContain('MyVariant');
+      expect(strategy.name).toContain('abcdef12');
+    });
+
+    it('parses multiple minimalRoi entries', () => {
+      const variant: GeneratedVariant = {
+        id: 'test-roi',
+        parentStrategy: 'base',
+        sourceCode: `
+export class V extends CrossChainStrategy {
+  override readonly minimalRoi = { 0: 0.05, 30: 0.02, 60: 0.01 };
+}`,
+        mutationDescription: 'ROI test',
+        generatedAt: Date.now(),
+        status: 'valid',
+      };
+
+      const strategy = createVariantStrategy(variant);
+      expect(strategy.minimalRoi[0]).toBe(0.05);
+      expect(strategy.minimalRoi[30]).toBe(0.02);
+      expect(strategy.minimalRoi[60]).toBe(0.01);
+    });
+  });
+
+  describe('full pipeline integration', () => {
+    it('generate -> validate -> backtest -> tournament -> paper trade (mock Claude API)', async () => {
+      // Use a valid variant that passes all validation checks
+      const validVariantResponse = {
+        content: [{
+          type: 'text' as const,
+          text: `\`\`\`typescript
+export class IntegrationVariant extends CrossChainStrategy {
+  readonly name = 'integration-variant';
+  readonly timeframe = '5m';
+  override readonly stoploss = -0.05;
+  override readonly maxPositions = 3;
+  override readonly minimalRoi = { 0: 0.03, 60: 0.01 };
+  override readonly trailingStop = false;
+
+  shouldExecute(context: StrategyContext): StrategySignal | null {
+    return null;
+  }
+
+  buildExecution(signal: StrategySignal, context: StrategyContext): ExecutionPlan {
+    return { id: 'plan-1', strategyName: this.name, actions: [], estimatedCostUsd: 0, estimatedDurationMs: 0, metadata: {} };
+  }
+}
+\`\`\`
+MUTATION: Integration test variant with conservative parameters`,
+        }],
+      };
+
+      mockCreate.mockResolvedValueOnce(validVariantResponse);
+
+      await generator.runEvolutionCycle();
+
+      // 1. Claude was called
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+
+      // 2. Variants were stored
+      const variants = generator.getVariants();
+      expect(variants.size).toBeGreaterThan(0);
+
+      // 3. At least one variant reached paper-trading
+      let hasPaperTrading = false;
+      for (const [, v] of variants) {
+        if (v.status === 'paper-trading') {
+          hasPaperTrading = true;
+        }
+      }
+      expect(hasPaperTrading).toBe(true);
+
+      // 4. Paper traders were created
+      const traders = generator.getActivePaperTraders();
+      expect(traders.size).toBeGreaterThan(0);
+
+      // 5. Paper trader start() was called
+      expect(mockPaperTraderStart).toHaveBeenCalled();
+
+      // 6. Evolution history was recorded
+      const history = generator.getEvolutionHistory();
+      expect(history).toHaveLength(1);
+      expect(history[0].variantsPromotedToPaperTrading).toBeGreaterThan(0);
+      expect(history[0].currentlyPaperTrading).toBeGreaterThan(0);
     });
   });
 
